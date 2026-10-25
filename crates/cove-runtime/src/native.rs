@@ -297,6 +297,21 @@ pub fn compile(program: &Program) -> Result<NativeProgram, Unavailable> {
     compile_with(program, false)
 }
 
+/// Whether this build and this host have a native tier at all, answered
+/// without a program.
+///
+/// [`compile()`] over the empty program: the same three host refusals it can
+/// answer — no code generator in this build, not x86-64, no executable mapping
+/// — and nothing a program could add, because a program never makes
+/// [`compile()`] fail. What a command asks when nobody named a backend
+/// ([ADR 0122]): the fastest tier this host has, which is this one where it
+/// answers `Ok` and the encoded VM where it does not.
+///
+/// [ADR 0122]: ../../../docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md
+pub fn available() -> Result<(), Unavailable> {
+    compile(&Program::default()).map(|_| ())
+}
+
 /// [`compile()`], binding helpers that count each call compiled code makes into
 /// the runtime.
 ///

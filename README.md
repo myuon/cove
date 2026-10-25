@@ -60,11 +60,14 @@ and records and replays the host calls a run made (`cove trace`,
 ## What exists
 
 - **A compiler front end** — parser, name resolution and a type checker.
-- **A VM** that runs programs by default.
+- **A native tier** that compiles the functions it can to machine code and
+  runs the rest on the VM. It is what runs a program by default on x86-64
+  Unix, and each run says how much of it was native
+  ([ADR 0122](docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md)).
+- **A VM** (`--backend vm`) that runs programs everywhere else, and every
+  function the native tier does not compile.
 - **A tree-walking interpreter** (`--backend ast`), kept as the reference the
   VM is checked against.
-- **A native tier** (`--backend native`, x86-64 only, experimental) that
-  compiles the functions it can to machine code and runs the rest on the VM.
 - **A standard library written mostly in Cove**, and a Host API whose every
   operation is listed in [docs/BUILTINS.md](docs/BUILTINS.md).
 - **Embedding**: a Rust host can run Cove with its own capability

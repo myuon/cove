@@ -11,6 +11,11 @@
 - Extends: [ADR 0019](0019-executable-ir-and-vm.md), whose executable IR remains the input to execution, and [ADR 0022](0022-the-vm-is-the-default-backend.md), whose VM remains the portable execution path while native execution is introduced
 - Preserves: [ADR 0040](0040-a-bound-outlives-its-backend.md)'s bounded stop, fuel, cancellation and Host-effect contracts
 - Does not supersede: the tree-walking interpreter as the semantic oracle, or the VM as the default backend before this ADR's adoption gate passes
+- Superseded in part by [ADR 0122](0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md):
+  its "Initially native execution is explicit. The VM remains the default until
+  the adoption gate below passes." With no `--backend`, a command now runs on
+  the native tier where the host has one; ADR 0122 is the follow-up ADR the
+  gate asks for and says how each item stands
 - Superseded in part by [ADR 0060](0060-a-backedge-tests-the-stride-before-it-calls.md):
   its "Safepoints occur at least: on loop backedges", read as an unconditional
   safepoint at every backedge. A backedge is now a poll — compiled code tests

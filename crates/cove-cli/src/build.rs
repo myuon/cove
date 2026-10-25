@@ -149,7 +149,11 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
         max_tasks: None,
         files_root: None,
         allow_exec: Vec::new(),
-        backend: Backend::default_for_a_run(),
+        // Not `Backend::default_for_a_run`, which is the native tier on a host
+        // that has one (ADR 0122). A built binary embeds its backend, and the
+        // fastest one this command can embed is the VM: the native tier is not
+        // embeddable yet (see `native_is_not_here`).
+        backend: Backend::Vm,
     };
     let mut i = 0;
     while i < args.len() {
@@ -775,7 +779,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
             max_tasks: None,
             files_root: None,
             allow_exec: Vec::new(),
-            backend: Backend::default_for_a_run(),
+            backend: Backend::Vm,
         }
     }
 

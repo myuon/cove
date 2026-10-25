@@ -75,6 +75,19 @@
 //! rendered by code neither evaluator owns, which is exactly why an assertion
 //! that they do not move is cheap to hold and worth holding.
 //!
+//! # The native tier and the VM, for the same cases
+//!
+//! Since ADR 0122 a command given no `--backend` runs on the fastest tier this
+//! build and host have, so in a build with the code generator on a Unix
+//! x86-64 host the golden files are the native tier's answer, and in a
+//! `--no-default-features` build — which CI runs this suite in too — they are
+//! the VM's. They are one set of files, so the two must give one answer, and
+//! the report a native run prints on stderr to say what ran where is not part
+//! of it: it is taken out of every run before anything is compared (see
+//! [`without_native_report`]). Where the default is native, every case the
+//! interpreter is compared on is also run with `--backend vm` and held to the
+//! same answer, so neither tier's coverage depends on which host ran the suite.
+//!
 //! A case with a `command` file names its own invocation and is run once.
 //! That is how a case that is *about* one of them — `backend_vm`,
 //! `backend_ast` — says so, and it is the way to opt out.
@@ -218,16 +231,18 @@ impl Actual {
 ///
 /// ADR 0055 requires a native run to say what ran where, on stderr, whether or
 /// not `--stats` was asked for — after the run and before the diagnostic that
-/// ends it, if one does. So the report is the lines from the first that begins
-/// `native: ` up to the first that begins a diagnostic, and everything the
-/// program itself wrote is on one side of it or the other.
+/// ends it, if one does — and `cove test` says it once for the suite, after the
+/// last test. Every line of such a report begins `native: ` or, for a table
+/// under one, with an indent, so the report is a line that begins `native: `
+/// and the indented lines straight after it; everything the program itself
+/// wrote, and every diagnostic, is on one side of it or the other.
 fn without_native_report(stderr: &str) -> String {
     let mut kept = String::new();
     let mut reporting = false;
     for line in stderr.split_inclusive('\n') {
         if line.starts_with("native: ") {
             reporting = true;
-        } else if reporting && (line.starts_with("error") || line.starts_with("warning")) {
+        } else if reporting && !line.starts_with(' ') {
             reporting = false;
         }
         if !reporting {
@@ -298,15 +313,15 @@ fn every_case_matches_its_golden_files() {
                 ));
             }
         }
-        // The native tier, for a case that asks and a binary that has one on a
-        // host it can run on (the expression is `cove-runtime`'s
-        // `tests/native_tier.rs`'s). See [`Case::asks_for_the_native_tier`].
+        // Where the default is the native tier — a binary with the code
+        // generator on a host it runs on (the expression is `cove-runtime`'s
+        // `tests/native_tier.rs`'s) — the encoded VM is run by name and held to
+        // the same answer, so the golden files are both tiers' (ADR 0122).
         if cfg!(all(feature = "template", target_arch = "x86_64", unix))
-            && case.asks_for_the_native_tier()
+            && case.compares_both_backends()
         {
-            let mut native = case.run_with(&root, &["--backend", "native"]);
-            native.stderr = without_native_report(&native.stderr);
-            if let Some(difference) = native.differs_from(&actual) {
+            let vm = case.run_with(&root, &["--backend", "vm"]);
+            if let Some(difference) = actual.differs_from(&vm) {
                 failures.push(format!(
                     "case `{name}`: the native tier and the encoded VM do not agree\n{difference}"
                 ));
@@ -394,22 +409,6 @@ impl Case {
         (!self.names_its_own_command && self.runs_an_entry()) || self.asks_for_both_backends()
     }
 
-    /// Whether a `native` file asks for this case to be run on the native tier
-    /// too, and held to what the encoded VM answered.
-    ///
-    /// Nothing else runs this corpus on the native tier: `cove test` refuses it
-    /// and the comparison above is the interpreter's. ADR 0068's gates ask that
-    /// AST, VM and native answer alike for every boxed-value operation it moves,
-    /// so the cases that pin those operations opt in here. It runs only in a
-    /// build with the `template` feature, which since ADR 0076 is the default
-    /// one — so `cargo t` runs it — because a `--no-default-features` build
-    /// has no code generator to ask; and only on a Unix x86-64 host, because
-    /// any other refuses `--backend native` with a capability diagnostic. CI runs this suite that way too, as the
-    /// check that a build without the feature retains the VM corpus.
-    fn asks_for_the_native_tier(&self) -> bool {
-        self.dir.join("native").exists()
-    }
-
     /// Whether a `both_backends` file asks for the comparison a `command`
     /// otherwise opts out of.
     ///
@@ -472,7 +471,10 @@ impl Case {
             success: output.status.success(),
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: normalize(&String::from_utf8_lossy(&output.stderr), root),
+            stderr: without_native_report(&normalize(
+                &String::from_utf8_lossy(&output.stderr),
+                root,
+            )),
         }
     }
 

@@ -92,8 +92,8 @@ pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Wo
 // doing exactly that.
 pub use cove_native::{Entry as NativeEntry, WindowCode};
 pub use native::{
-    compile as compile_native, compile_counting as compile_native_counting, Blocked, Blocker,
-    NativeProgram, Refused,
+    available as native_available, compile as compile_native,
+    compile_counting as compile_native_counting, Blocked, Blocker, NativeProgram, Refused,
 };
 pub use vm::exec::native::{
     ablate as native_ablate, census_reset, census_taken, helpers as native_helpers,

@@ -43,6 +43,13 @@ pub enum TestBackend {
     Vm,
     /// The tree-walking interpreter, which lowers nothing.
     Ast,
+    /// Lowered as [`TestBackend::Vm`] is, then compiled to the native tier of
+    /// ADR 0055 once per test: a function the code generator refuses runs on
+    /// the encoded VM, and [`PreparedTest::native`] and [`Crossings`] are what
+    /// a runner reports the mixture from ([ADR 0122]).
+    ///
+    /// [ADR 0122]: ../../../docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md
+    Native,
 }
 
 /// How a suite's tests are run: what they are compiled against, on which
@@ -82,8 +89,34 @@ pub struct TestFailure {
 /// arguments of its own. Building each case's machine with [`Vm::new`]
 /// instead re-encodes the program per case, which measured 0.35 ms a case on
 /// a property whose body does nothing, against 0.003 ms on the interpreter.
+///
+/// On [`TestBackend::Native`] the machine code is compiled here too, once per
+/// test, and every case of a property runs over the same table.
 pub struct PreparedTest {
     lowered: Option<PreparedProgram>,
+}
+
+impl PreparedTest {
+    /// The test's machine code, on [`TestBackend::Native`]: which functions
+    /// were compiled and which were refused, and why.
+    pub fn native(&self) -> Option<&crate::native::NativeProgram> {
+        self.lowered.as_ref()?.native()
+    }
+}
+
+/// How one run of a test divided its calls between the tiers, on
+/// [`TestBackend::Native`].
+///
+/// The run's half of the mixture report ADR 0055 asks a native run for; the
+/// program's half — what was compiled and what refused — is
+/// [`PreparedTest::native`]'s, and `Refused::id` joins the two.
+#[derive(Clone, Debug, Default)]
+pub struct Crossings {
+    /// Calls by the tier each crossed from and to.
+    pub tiers: crate::Tiers,
+    /// Dynamic calls to each function that stayed on the encoded tier, by
+    /// `FunctionId`, as [`Vm::refused_calls`] counts them.
+    pub refused_calls: Vec<u64>,
 }
 
 impl TestRun<'_> {
@@ -103,24 +136,49 @@ impl TestRun<'_> {
         // roots is lowered to one answer, so one unlowerable test would
         // become every test's refusal. Per test, a construct the backend
         // cannot run refuses only the tests that reach it.
-        let lowered = match self.backend {
-            TestBackend::Ast => None,
-            TestBackend::Vm => match cove_ir::lower_entry(
-                self.program,
-                self.sources,
-                self.schemas,
-                test.module,
-                test.name,
-            ) {
-                Ok(ir) => Some(PreparedProgram::new(Arc::new(ir))),
-                Err(items) => {
-                    return Err(Box::new(TestFailure {
-                        diagnostic: unlowered(test, &items),
-                        denied_capability: None,
-                    }))
-                }
-            },
-        };
+        let lowered =
+            match self.backend {
+                TestBackend::Ast => None,
+                TestBackend::Vm | TestBackend::Native => match cove_ir::lower_entry(
+                    self.program,
+                    self.sources,
+                    self.schemas,
+                    test.module,
+                    test.name,
+                ) {
+                    Ok(ir) => {
+                        let prepared = PreparedProgram::new(Arc::new(ir));
+                        match self.backend {
+                            TestBackend::Native => match prepared.with_native() {
+                                Ok(prepared) => Some(prepared),
+                                // The host's refusal, never a fallback (ADR 0055).
+                                // A runner that asks whether the tier exists before
+                                // the suite starts never reaches it.
+                                Err(unavailable) => {
+                                    return Err(Box::new(TestFailure {
+                                        diagnostic: Diagnostic::error(
+                                            FAILED,
+                                            format!(
+                                                "test `{}` could not run: {unavailable}",
+                                                test.qualified_name()
+                                            ),
+                                        )
+                                        .at(test.entry.decl.name.span),
+                                        denied_capability: None,
+                                    }))
+                                }
+                            },
+                            TestBackend::Vm | TestBackend::Ast => Some(prepared),
+                        }
+                    }
+                    Err(items) => {
+                        return Err(Box::new(TestFailure {
+                            diagnostic: unlowered(test, &items),
+                            denied_capability: None,
+                        }))
+                    }
+                },
+            };
         Ok(PreparedTest { lowered })
     }
 
@@ -139,6 +197,19 @@ impl TestRun<'_> {
         hosts: HostRegistry,
         args: Vec<Value>,
     ) -> Option<TestFailure> {
+        self.run_prepared_counting(test, prepared, hosts, args).0
+    }
+
+    /// [`TestRun::run_prepared`], answering as well how the run divided its
+    /// calls between the tiers — `None` unless the test was prepared with
+    /// machine code.
+    pub fn run_prepared_counting(
+        &self,
+        test: &DeclaredTest,
+        prepared: &PreparedTest,
+        hosts: HostRegistry,
+        args: Vec<Value>,
+    ) -> (Option<TestFailure>, Option<Crossings>) {
         let invoked = !test.entry.decl.params.is_empty();
         let runtime = Runtime::new(
             Arc::clone(self.program),
@@ -149,7 +220,7 @@ impl TestRun<'_> {
             .limits
             .as_ref()
             .map(|limits| Budget::new(limits.clone()));
-        let (outcome, assertion) = match &prepared.lowered {
+        let (outcome, assertion, crossings) = match &prepared.lowered {
             Some(ir) => {
                 let mut vm = Vm::with_prepared(&runtime, runtime.hosts(), ir);
                 let outcome = match (budget, invoked) {
@@ -163,7 +234,11 @@ impl TestRun<'_> {
                 let assertion = vm
                     .assertion_failure()
                     .map(|(span, message)| (span, message.to_string()));
-                (outcome, assertion)
+                let crossings = ir.native().map(|_| Crossings {
+                    tiers: vm.tiers(),
+                    refused_calls: vm.refused_calls().to_vec(),
+                });
+                (outcome, assertion, crossings)
             }
             None => {
                 let mut interpreter = Interpreter::new(&runtime);
@@ -180,10 +255,10 @@ impl TestRun<'_> {
                 let assertion = interpreter
                     .assertion_failure()
                     .map(|(span, message)| (span, message.to_string()));
-                (outcome, assertion)
+                (outcome, assertion, None)
             }
         };
-        report(test, outcome, assertion)
+        (report(test, outcome, assertion), crossings)
     }
 }
 

@@ -40,9 +40,13 @@ const REQUIRED_RETURN_TYPE: &str = "Result<String, Error>";
 /// lowering has a gap for would otherwise have no way to run at all. Every
 /// other budget stays `[run.<name>]`'s, per ADR 0010.
 pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
-    let (backend, rest) = crate::split_backend(args)?;
+    // Named or not, which decides how much of a native run's mixture is
+    // reported: see `RunFlags::backend_named`.
+    let (backend, rest) = crate::split_backend_if_named(args)?;
     let mut flags = RunFlags::none();
-    flags.set_backend(backend);
+    if let Some(backend) = backend {
+        flags.set_backend(backend);
+    }
     if rest.first().map(String::as_str) == Some("--check") {
         return generate_check(None, &flags);
     }

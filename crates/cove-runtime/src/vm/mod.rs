@@ -425,18 +425,32 @@ impl<'a> Vm<'a> {
     /// refuses it: by [`Vm::run_entry`] and [`Vm::invoke`], before a frame is
     /// pushed. The refusal was found once, by [`PreparedProgram::new`], and
     /// every run built from it answers with the same one.
+    ///
+    /// A preparation built with [`PreparedProgram::with_native`] is run with
+    /// its machine code installed, as an [`OwnedVm`] built from it is: the
+    /// table was compiled for every run of this preparation, and a run that
+    /// ignored it would be the encoded tier under a preparation that says
+    /// otherwise. The calling thread then keeps
+    /// [the stack promise](Vm#the-calling-threads-stack).
     pub fn with_prepared(
         runtime: &'a Runtime,
         hosts: &'a HostRegistry,
         prepared: &'a PreparedProgram,
     ) -> Vm<'a> {
-        Vm::assemble(
+        let mut vm = Vm::assemble(
             runtime,
             hosts,
             &prepared.program,
             &prepared.prepared,
             DEFAULT_HEAP_WORDS,
-        )
+        );
+        if let Some(native) = prepared.native.as_deref() {
+            // Safety: the table is borrowed for `'a` through `prepared`, so it
+            // outlives this `Vm` and the machine inside it, which is what
+            // `install_native` asks.
+            unsafe { vm.machine.install_native(native) };
+        }
+        vm
     }
 
     /// The one place a `Vm` is put together: [`Vm::with_heap_words`] reaches

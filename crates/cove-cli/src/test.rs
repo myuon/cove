@@ -33,10 +33,23 @@
 //! reports expected failure. The runner renders that failure as a
 //! diagnostic, so a failing assertion points at source like every other
 //! error, and exits non-zero when any test failed.
+//!
+//! # Which tier ran
+//!
+//! With no `--backend` a suite runs on the fastest tier this build and host
+//! have — the native tier of ADR 0055 where there is one, the VM otherwise —
+//! as every command that runs a program does since ADR 0122. Each test is
+//! lowered and compiled once, and every case of a property runs over that one
+//! table. A function the code generator refuses runs on the encoded VM, so a
+//! native suite is a mixture, and ADR 0055 forbids presenting one as fully
+//! native: the suite reports its mixture once, aggregated over every test, on
+//! stderr after the last one (see [`SuiteTiers`]). A suite on the VM prints
+//! no such report, as `cove run` on the VM prints none.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::clock::{Clock, VirtualTime};
@@ -45,7 +58,8 @@ use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::Http;
 use cove_runtime::process::{Process, ProcessLog};
-use cove_runtime::testing::{TestBackend, TestFailure, TestRun};
+use cove_runtime::testing::{Crossings, TestBackend, TestFailure, TestRun};
+use cove_runtime::{NativeProgram, Tiers};
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
@@ -74,7 +88,7 @@ impl Default for Properties {
     }
 }
 
-/// Runs `cove test [path] [--filter <substring>] [--seed <n>] [--backend <ast|vm>]`.
+/// Runs `cove test [path] [--filter <substring>] [--seed <n>] [--backend <ast|vm|native>]`.
 pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
@@ -111,14 +125,12 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
                         Backend::NAMES
                     ))
                 })?;
-                // Refused rather than accepted and run on the VM, for the reason
-                // `native_is_not_here` gives: a suite that reported "native" for a
-                // run that was not is the silent mixture ADR 0055 forbids. What a
-                // suite needs and does not have yet is one aggregate report over
-                // every case's own tier table, and 165 per-case reports are not
-                // that.
+                // Named on a host or build without the tier, ADR 0055's
+                // capability diagnostic, as `cove run --backend native` gives
+                // it: never a suite quietly run on the VM under the name.
                 if backend == Backend::Native {
-                    return Err(crate::native_is_not_here("test"));
+                    cove_runtime::native_available()
+                        .map_err(|unavailable| CliError::Message(unavailable.to_string()))?;
                 }
                 i += 1;
             }
@@ -147,6 +159,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let selected = select(&all, filter);
 
     let mut failed = 0;
+    let mut tiers = SuiteTiers::default();
     for test in &selected {
         let name = test.qualified_name();
         match run_test(
@@ -157,6 +170,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             &program,
             backend,
             properties,
+            &mut tiers,
         ) {
             Ok(None) => println!("{}", result_line("ok", &name)),
             Ok(Some(cases)) => println!("{} ({cases} cases)", result_line("ok", &name)),
@@ -168,6 +182,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
         }
     }
 
+    eprint!("{}", tiers.report());
     println!(
         "{}",
         summary(selected.len(), all.len(), selected.len() - failed, failed)
@@ -201,7 +216,9 @@ fn select<'a>(tests: &'a [DeclaredTest<'a>], filter: Option<&str>) -> Vec<&'a De
 ///
 /// Every test gets a registry of its own, and so does every case of a
 /// property: a fake host holds state, and one run must not observe what
-/// another one left behind.
+/// another one left behind. On the native tier, what was compiled and how each
+/// run crossed between the tiers is added to `tiers`.
+#[allow(clippy::too_many_arguments)]
 fn run_test(
     test: &DeclaredTest,
     root: &Path,
@@ -210,6 +227,7 @@ fn run_test(
     program: &Arc<cove_sema::resolve::Program>,
     backend: Backend,
     properties: Properties,
+    tiers: &mut SuiteTiers,
 ) -> Result<Option<u32>, Box<Diagnostic>> {
     let required: Vec<&str> = test
         .entry
@@ -259,7 +277,8 @@ fn run_test(
         schemas: &HostSchemas::new(),
         backend: match backend {
             Backend::Ast => TestBackend::Ast,
-            Backend::Vm | Backend::Native => TestBackend::Vm,
+            Backend::Vm => TestBackend::Vm,
+            Backend::Native => TestBackend::Native,
         },
         limits: None,
     };
@@ -267,8 +286,20 @@ fn run_test(
     let prepared = run
         .prepare(test)
         .map_err(|failure| Box::new(explained(*failure)))?;
+    // Compiled once, in `prepare`, for this test and every case of it.
+    let native = prepared.native();
+    if let Some(native) = native {
+        tiers.compiled(native);
+    }
+    let mut counted = |(failure, crossings): (Option<TestFailure>, Option<Crossings>)| {
+        if let (Some(native), Some(crossings)) = (native, crossings) {
+            tiers.ran(native, &crossings);
+        }
+        failure
+    };
     if test.entry.decl.params.is_empty() {
-        return match run.run_prepared(test, &prepared, registry, Vec::new()) {
+        let outcome = run.run_prepared_counting(test, &prepared, registry, Vec::new());
+        return match counted(outcome) {
             None => Ok(None),
             Some(failure) => Err(Box::new(explained(failure))),
         };
@@ -281,12 +312,12 @@ fn run_test(
     let name = test.qualified_name();
     let seed = properties.seed.unwrap_or_else(|| property::seed_for(&name));
     let verdict = property::check(&shapes, properties.cases, seed, |args| {
-        run.run_prepared(
+        counted(run.run_prepared_counting(
             test,
             &prepared,
             hosts(),
             args.iter().map(Arg::value).collect(),
-        )
+        ))
     });
     match verdict {
         Verdict::Passed { cases } => Ok(Some(cases)),
@@ -465,6 +496,182 @@ fn register_hosts(hosts: &mut HostRegistry, root: &Path, allow_real: &BTreeSet<&
     }
 }
 
+/// What a suite on the native tier ran where, over every test it ran.
+///
+/// ADR 0055 asks a native run to report "how many calls and functions used each
+/// tier, so a benchmark cannot present a mixed run as fully native", and `cove
+/// run`'s report is that for one program. A suite is one program per test —
+/// each is lowered on its own — so a report per test would be a hundred and
+/// sixty-five tables and no answer. This is the one answer: the same figures,
+/// in the same words, summed over the suite.
+///
+/// Two things about the sums are deliberate:
+///
+/// - **functions are counted per lowering.** The standard library's `map` is
+///   compiled once in every test that reaches it, and it is compiled that many
+///   times, so the figure is what the suite compiled rather than how many
+///   distinct functions it has;
+/// - **refusals are aggregated by reason, and a function is one function.** A
+///   refusal is a fact about a function and not about the test that reached
+///   it, so the table counts each refused function once under its reason, and
+///   charges it every dynamic call it kept in the VM over every run — the
+///   ranking `cove run`'s table uses, by the work a refusal prevented.
+#[derive(Default)]
+pub(crate) struct SuiteTiers {
+    /// Tests compiled, once each.
+    tests: usize,
+    /// Runs on compiled tables: one per ordinary test, one per property case.
+    runs: u64,
+    reachable: usize,
+    compiled: usize,
+    refused: usize,
+    compile: Duration,
+    tiers: Tiers,
+    /// Runs whose outermost frame — the test function itself — was entered
+    /// compiled. A run enters its outermost frame on the encoded tier today, so
+    /// this is nought, and is printed so that a reader of the call counts knows
+    /// the test's own body is not among them.
+    outermost_native: u64,
+    /// Refused functions by reason: each function's name and the dynamic
+    /// calls it kept in the VM over every run.
+    reasons: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+impl SuiteTiers {
+    /// One test's table, compiled.
+    fn compiled(&mut self, native: &NativeProgram) {
+        self.tests += 1;
+        self.reachable += native.reachable();
+        self.compiled += native.compiled();
+        self.refused += native.refused();
+        self.compile += native.compile_time();
+        for row in native.refusals() {
+            self.reasons
+                .entry(row.reason.clone())
+                .or_default()
+                .entry(row.name.clone())
+                .or_default();
+        }
+    }
+
+    /// One run over that table.
+    fn ran(&mut self, native: &NativeProgram, crossings: &Crossings) {
+        self.runs += 1;
+        let (sum, run) = (&mut self.tiers, crossings.tiers);
+        sum.vm_to_vm += run.vm_to_vm;
+        sum.vm_to_native += run.vm_to_native;
+        sum.native_to_vm += run.native_to_vm;
+        sum.native_to_native_direct += run.native_to_native_direct;
+        sum.native_to_native_inline += run.native_to_native_inline;
+        sum.native_to_native_mediated += run.native_to_native_mediated;
+        sum.host_to_native += run.host_to_native;
+        sum.host_to_vm += run.host_to_vm;
+        if run.host_to_native > 0 {
+            self.outermost_native += 1;
+        }
+        for row in native.refusals() {
+            let made = crossings
+                .refused_calls
+                .get(row.id.index())
+                .copied()
+                .unwrap_or(0);
+            *self
+                .reasons
+                .entry(row.reason.clone())
+                .or_default()
+                .entry(row.name.clone())
+                .or_default() += made;
+        }
+    }
+
+    /// The report, for stderr: empty for a suite that compiled nothing, which
+    /// is a suite on the VM or the interpreter.
+    pub(crate) fn report(&self) -> String {
+        use crate::thousands;
+        use std::fmt::Write;
+        if self.tests == 0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        let share = match self.reachable {
+            0 => 0.0,
+            whole => 100.0 * self.compiled as f64 / whole as f64,
+        };
+        let _ = writeln!(
+            out,
+            "native: {} test(s) compiled once each: {} of {} reachable function(s) compiled \
+             ({:.1}%), {} refused; compilation {:.1} ms",
+            self.tests,
+            thousands(self.compiled as u64),
+            thousands(self.reachable as u64),
+            share,
+            thousands(self.refused as u64),
+            self.compile.as_secs_f64() * 1000.0,
+        );
+        let tiers = self.tiers;
+        let _ = writeln!(
+            out,
+            "native: {} run(s), a property's cases counted one by one; the outermost frame \
+             native in {} and encoded in {}",
+            thousands(self.runs),
+            thousands(self.outermost_native),
+            thousands(self.runs - self.outermost_native),
+        );
+        let _ = writeln!(
+            out,
+            "native: calls VM -> VM {}, VM -> native {}, native -> VM {}, native -> native {}; \
+             {:.1}% of {} Cove call(s) used native code",
+            thousands(tiers.vm_to_vm),
+            thousands(tiers.vm_to_native),
+            thousands(tiers.native_to_vm),
+            thousands(tiers.native_to_native_direct + tiers.native_to_native_mediated),
+            crate::native_share(tiers),
+            thousands(tiers.calls()),
+        );
+        if self.reasons.is_empty() {
+            return out;
+        }
+        // Ranked by the dynamic calls each reason kept in the VM, then by the
+        // reason, so the table is the same table twice for one suite.
+        let mut reasons: Vec<(&String, usize, u64, String)> = self
+            .reasons
+            .iter()
+            .map(|(reason, functions)| {
+                let calls = functions.values().sum();
+                // The function this reason kept in the VM most, by name after
+                // that so a tie is broken the same way twice.
+                let top = match functions
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                {
+                    Some((name, &made)) if made > 0 => format!(" ({name}, {})", thousands(made)),
+                    _ => String::new(),
+                };
+                (reason, functions.len(), calls, top)
+            })
+            .collect();
+        reasons.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+        let _ = writeln!(
+            out,
+            "native: refusals by reason, ranked by the dynamic calls each kept in the VM"
+        );
+        let _ = writeln!(
+            out,
+            "  {:>13} {:>10}  refusal reason (the function it kept in the VM most)",
+            "dynamic calls", "functions"
+        );
+        for (reason, functions, calls, top) in reasons {
+            let _ = writeln!(
+                out,
+                "  {:>13} {:>10}  {reason}{top}",
+                thousands(calls),
+                thousands(functions as u64)
+            );
+        }
+        out
+    }
+}
+
 /// One test's line of output.
 fn result_line(status: &str, name: &str) -> String {
     format!("{status:<4}  {name}")
@@ -500,15 +707,16 @@ mod tests {
         dir
     }
 
-    /// Runs every test of the package at `root` on both backends, in order,
-    /// reporting each one's name and the message it failed with.
+    /// Runs every test of the package at `root` on every backend this host
+    /// has, in order, reporting each one's name and the message it failed with.
     ///
-    /// Both, and asserting they agree, because `cove test` runs on the
-    /// linear-memory backend and every assertion below used to be about the
-    /// interpreter. Running only the default would have retired that coverage
-    /// silently; running both keeps it and adds the property that matters
-    /// more than either — that a suite reports the same thing whichever
-    /// evaluator ran it.
+    /// Every one, and asserting they agree, because `cove test` runs on the
+    /// fastest tier the host has and every assertion below used to be about
+    /// the interpreter. Running only the default would have retired that
+    /// coverage silently; running each keeps it and adds the property that
+    /// matters more than any — that a suite reports the same thing whichever
+    /// evaluator ran it. The native tier is one of them where it runs (ADR
+    /// 0122), gated as every native test is.
     fn run_all(root: &Path, allow_real: &[&str]) -> Vec<(String, Option<String>)> {
         let on_the_backend = run_all_on(root, allow_real, Backend::Vm);
         let on_the_oracle = run_all_on(root, allow_real, Backend::Ast);
@@ -516,6 +724,13 @@ mod tests {
             on_the_backend, on_the_oracle,
             "the two evaluators report this suite differently"
         );
+        if cfg!(all(feature = "template", target_arch = "x86_64", unix)) {
+            let on_the_tier = run_all_on(root, allow_real, Backend::Native);
+            assert_eq!(
+                on_the_backend, on_the_tier,
+                "the native tier and the encoded VM report this suite differently"
+            );
+        }
         on_the_backend
     }
 
@@ -524,6 +739,16 @@ mod tests {
         root: &Path,
         allow_real: &[&str],
         backend: Backend,
+    ) -> Vec<(String, Option<String>)> {
+        run_all_counted(root, allow_real, backend, &mut SuiteTiers::default())
+    }
+
+    /// [`run_all_on`], adding what each test compiled and ran to `tiers`.
+    fn run_all_counted(
+        root: &Path,
+        allow_real: &[&str],
+        backend: Backend,
+        tiers: &mut SuiteTiers,
     ) -> Vec<(String, Option<String>)> {
         let (sources, _, program) = check_fixture(root);
         let (sources, program) = (Arc::new(sources), Arc::new(program));
@@ -540,6 +765,7 @@ mod tests {
                     &program,
                     backend,
                     Properties::default(),
+                    tiers,
                 );
                 (
                     test.qualified_name(),
@@ -614,6 +840,7 @@ mod tests {
                 &program,
                 backend,
                 Properties::default(),
+                &mut SuiteTiers::default(),
             )
             .expect_err("the test fails");
             let rendered = render(&sources, &diagnostic);
@@ -650,6 +877,7 @@ mod tests {
                 &program,
                 backend,
                 Properties::default(),
+                &mut SuiteTiers::default(),
             )
             .expect_err("the test fails");
             let rendered = render(&sources, &diagnostic);
@@ -796,6 +1024,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &program,
             Backend::Vm,
             Properties::default(),
+            &mut SuiteTiers::default(),
         )
         .expect_err("the boundary refuses the call");
         assert!(
@@ -952,6 +1181,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
                 &program,
                 Backend::Vm,
                 Properties { cases, seed },
+                &mut SuiteTiers::default(),
             )
             .expect_err("the property fails")
             .message
@@ -960,6 +1190,129 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
         assert_eq!(message(Some(1), 100), message(Some(1), 100));
         let derived = property::seed_for("unit.small");
         assert_eq!(message(None, 100), message(Some(derived), 100));
+    }
+
+    /// A function the inliner leaves a call to, because it calls itself, so
+    /// that a test of it makes Cove calls the tier counts.
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+    const RECURSIVE: &str = "/// The sum of `1` to `n`, or `0` for a negative `n`.\n\
+         export fn sumTo(n: Int) -> Int {\n  if n <= 0 {\n    0\n  } else {\n    n + sumTo(n - 1)\n  }\n}\n\n";
+
+    /// A suite on the VM or the interpreter compiles nothing and reports no
+    /// mixture: there is none, and a report would claim a tier that did not
+    /// run.
+    #[test]
+    fn a_suite_off_the_native_tier_reports_no_mixture() {
+        let dir = package(
+            "no-mixture",
+            "",
+            "test fn passes() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        );
+        for backend in [Backend::Vm, Backend::Ast] {
+            let mut tiers = SuiteTiers::default();
+            run_all_counted(dir.path(), &[], backend, &mut tiers);
+            assert_eq!(tiers.report(), "", "{backend}");
+        }
+    }
+
+    /// A suite on the native tier reports its mixture once, over every test:
+    /// what was compiled, how the runs crossed between the tiers, and the
+    /// refusals by reason. Every line of it begins `native: ` or is indented
+    /// under one, which is the shape the end-to-end harness takes out.
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+    #[test]
+    fn a_native_suite_reports_its_mixture_once() {
+        let dir = package(
+            "mixture",
+            "",
+            &format!(
+                "{RECURSIVE}\
+                 test fn sumsThree() -> Result<Unit, Error> {{\n  assertEqual(sumTo(3), 6)?\n  Ok(())\n}}\n\n\
+                 test fn sumsFour() -> Result<Unit, Error> {{\n  assertEqual(sumTo(4), 10)?\n  Ok(())\n}}\n"
+            ),
+        );
+        let mut tiers = SuiteTiers::default();
+        let results = run_all_counted(dir.path(), &[], Backend::Native, &mut tiers);
+        assert!(
+            results.iter().all(|(_, failed)| failed.is_none()),
+            "{results:?}"
+        );
+        assert_eq!(tiers.tests, 2);
+        assert_eq!(tiers.runs, 2);
+        assert!(tiers.compiled > 0, "nothing was compiled");
+        let report = tiers.report();
+        assert!(
+            report.starts_with("native: 2 test(s) compiled once each: "),
+            "{report}"
+        );
+        assert!(report.contains("Cove call(s) used native code"), "{report}");
+        assert!(tiers.tiers.native() > 0, "{report}");
+        assert!(
+            report
+                .lines()
+                .all(|line| line.starts_with("native: ") || line.starts_with(' ')),
+            "{report}"
+        );
+    }
+
+    /// A property on the native tier is compiled once and every case runs
+    /// over that table — and the cases do run compiled code: the crossing into
+    /// it is counted, not assumed.
+    #[cfg(all(feature = "template", target_arch = "x86_64", unix))]
+    #[test]
+    fn a_property_runs_on_the_native_tier_compiled_once() {
+        let dir = package(
+            "native-property",
+            "",
+            &format!(
+                "{RECURSIVE}\
+                 test fn sumsAreNotNegative(n: Int) -> Result<Unit, Error> {{\n  \
+                 assert(sumTo(n % 20) >= 0)?\n  Ok(())\n}}\n"
+            ),
+        );
+        let mut tiers = SuiteTiers::default();
+        let results = run_all_counted(dir.path(), &[], Backend::Native, &mut tiers);
+        assert_eq!(results, [("unit.sumsAreNotNegative".to_string(), None)]);
+        assert_eq!(tiers.tests, 1, "compiled once for the property");
+        assert_eq!(tiers.runs, u64::from(property::DEFAULT_CASES));
+        assert!(
+            tiers.tiers.native() > 0,
+            "no call entered compiled code: {:?}",
+            tiers.tiers
+        );
+    }
+
+    /// Named on a host without the tier, `--backend native` is ADR 0055's
+    /// capability diagnostic, as on `cove run`; where the tier runs it is
+    /// accepted.
+    #[test]
+    fn backend_native_is_accepted_where_the_tier_runs_and_refused_elsewhere() {
+        let dir = package(
+            "native-named",
+            "",
+            "test fn passes() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        );
+        let args = [
+            dir.path().display().to_string(),
+            "--backend".to_string(),
+            "native".to_string(),
+        ];
+        match (
+            cmd_test(&args),
+            cfg!(all(feature = "template", target_arch = "x86_64", unix)),
+        ) {
+            (Ok(()), true) => {}
+            (Err(CliError::Message(message)), false) => {
+                assert!(
+                    message.starts_with("native execution is unavailable: "),
+                    "{message}"
+                )
+            }
+            (outcome, runs) => panic!(
+                "`cove test --backend native` answered {:?} on a host where the tier runs: {runs}",
+                outcome.is_ok()
+            ),
+        }
     }
 
     #[test]
