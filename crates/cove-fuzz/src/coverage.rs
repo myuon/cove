@@ -148,10 +148,20 @@ fn subject(target: &str, data: &[u8]) -> Option<Measured> {
 
 /// Records where a watched run was, and halts it at a count.
 struct Recorder {
+    program: Arc<Program>,
     seen: Mutex<BTreeSet<(u32, u32)>>,
+    /// Where an instruction ran in the state that tells a right
+    /// implementation from a wrong one ([`trigger`]), by function and key.
+    triggered: Mutex<BTreeSet<(u32, String)>>,
+    /// How often each site's operands have been read, so that a hot loop's
+    /// comparison is read [`TRIGGER_READS`] times and not every time.
+    reads: Mutex<BTreeMap<(u32, u32), u32>>,
     count: AtomicU64,
     halt_at: u64,
 }
+
+/// The most times one site's operands are read in one program.
+pub const TRIGGER_READS: u32 = 256;
 
 impl Debugger for Recorder {
     fn at(&self, stop: &Stop<'_>) -> Resume {
@@ -159,10 +169,106 @@ impl Debugger for Recorder {
         if n >= self.halt_at {
             return Resume::Halt;
         }
+        let site = (stop.function_id().0, stop.pc());
         if let Ok(mut seen) = self.seen.lock() {
-            seen.insert((stop.function_id().0, stop.pc()));
+            seen.insert(site);
+        }
+        let inst = self
+            .program
+            .functions
+            .get(site.0 as usize)
+            .and_then(|f| f.code.get(site.1 as usize));
+        let Some(inst) = inst.filter(|i| has_trigger(i)) else {
+            return Resume::Go;
+        };
+        let due = self.reads.lock().is_ok_and(|mut reads| {
+            let r = reads.entry(site).or_default();
+            *r += 1;
+            *r <= TRIGGER_READS
+        });
+        if due {
+            if let Some(k) = trigger(inst, slots_of(stop)) {
+                if let Ok(mut triggered) = self.triggered.lock() {
+                    triggered.insert((site.0, k));
+                }
+            }
         }
         Resume::Go
+    }
+}
+
+/// The innermost frame's words, by slot: every word a name covers and every
+/// word none does, which is the whole frame.
+fn slots_of(stop: &Stop<'_>) -> impl Fn(u32) -> Option<u64> {
+    let mut words = BTreeMap::new();
+    if let Some(call) = stop.frame(0) {
+        for local in call.locals() {
+            for w in local.words() {
+                words.insert(w.at(), w.raw());
+            }
+        }
+        for w in call.words() {
+            words.insert(w.at(), w.raw());
+        }
+    }
+    move |slot| words.get(&slot).copied()
+}
+
+fn has_trigger(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::Cmp {
+            on: cove_ir::Compare::Int,
+            ..
+        } | Inst::Arith {
+            num: cove_ir::Num::Int,
+            ..
+        } | Inst::ArithImm { .. }
+    )
+}
+
+/// The condition under which an instruction's answer depends on a detail a
+/// wrong implementation could get wrong, if `inst` has one and `slot` reads
+/// its operands: two equal operands of an `Int` comparison (where `<` and
+/// `<=` differ), and an `Int` addition, subtraction or multiplication whose
+/// exact answer is not an `Int` (where checking and wrapping differ).
+///
+/// Named `<key>:<condition>`, so that a row of the coverage table can say an
+/// instruction was not only executed but executed in the state that tells a
+/// right implementation from a wrong one.
+pub fn trigger(inst: &Inst, slot: impl Fn(u32) -> Option<u64>) -> Option<String> {
+    let int = |s: u32| slot(s).map(|w| w as i64);
+    match inst {
+        Inst::Cmp {
+            on: cove_ir::Compare::Int,
+            op,
+            a,
+            b,
+            ..
+        } => (int(*a)? == int(*b)?)
+            .then(|| format!("{}:equal", key(inst)))
+            .filter(|_| !matches!(op, cove_ir::CmpOp::Order)),
+        Inst::Arith {
+            num: cove_ir::Num::Int,
+            op,
+            a,
+            b,
+            ..
+        } => overflows(*op, int(*a)?, int(*b)?).then(|| format!("{}:overflow", key(inst))),
+        Inst::ArithImm { op, a, value, .. } => {
+            overflows(*op, int(*a)?, *value).then(|| format!("{}:overflow", key(inst)))
+        }
+        _ => None,
+    }
+}
+
+fn overflows(op: cove_ir::ArithOp, a: i64, b: i64) -> bool {
+    use cove_ir::ArithOp;
+    match op {
+        ArithOp::Add => a.checked_add(b).is_none(),
+        ArithOp::Sub => a.checked_sub(b).is_none(),
+        ArithOp::Mul => a.checked_mul(b).is_none(),
+        ArithOp::Div | ArithOp::Rem => false,
     }
 }
 
@@ -173,6 +279,8 @@ struct Measure {
     present_compiled: BTreeSet<String>,
     executed: BTreeSet<String>,
     executed_compiled: BTreeSet<String>,
+    triggered: BTreeSet<String>,
+    triggered_compiled: BTreeSet<String>,
     instructions: u64,
     watched: u64,
 }
@@ -242,7 +350,10 @@ fn measure(m: Measured) -> Option<Measure> {
         Arc::clone(&hosts),
     );
     let recorder = Recorder {
+        program: Arc::clone(&program),
         seen: Mutex::new(BTreeSet::new()),
+        triggered: Mutex::new(BTreeSet::new()),
+        reads: Mutex::new(BTreeMap::new()),
         count: AtomicU64::new(0),
         halt_at: out.instructions.max(1),
     };
@@ -258,7 +369,7 @@ fn measure(m: Measured) -> Option<Measure> {
         Entry::Lowered { module, name, .. } => (&**module, &**name),
     };
     let outermost = program.function_named(module, name).map(|id| id.0);
-    let seen = recorder.seen.into_inner().unwrap_or_default();
+    let seen = std::mem::take(&mut *recorder.seen.lock().unwrap_or_else(|p| p.into_inner()));
     for (function, pc) in seen {
         let Some(f) = program.functions.get(function as usize) else {
             continue;
@@ -271,6 +382,12 @@ fn measure(m: Measured) -> Option<Measure> {
             out.executed_compiled.insert(k.clone());
         }
         out.executed.insert(k);
+    }
+    for (function, k) in recorder.triggered.into_inner().unwrap_or_default() {
+        if compiled.contains(&function) && Some(function) != outermost {
+            out.triggered_compiled.insert(k.clone());
+        }
+        out.triggered.insert(k);
     }
     Some(out)
 }
@@ -339,6 +456,8 @@ pub fn replay(target: &str, paths: &[PathBuf]) -> Result<Stats, String> {
                     (&m.present_compiled, "present_compiled"),
                     (&m.executed, "executed"),
                     (&m.executed_compiled, "executed_compiled"),
+                    (&m.triggered, "triggered"),
+                    (&m.triggered_compiled, "triggered_compiled"),
                 ] {
                     for k in set {
                         stats.add(&["coverage", k, name], 1);
@@ -368,7 +487,16 @@ pub fn summary(stats: &Stats) -> String {
         g(&["programs", "watched_short"]),
     );
     let mut rows: BTreeMap<String, [u64; 4]> = BTreeMap::new();
+    let mut triggers: Vec<(String, u64, u64)> = Vec::new();
     for k in stats.groups(&["coverage"]) {
+        if k.contains(':') {
+            triggers.push((
+                k.clone(),
+                stats.get(&["coverage", &k, "triggered"]),
+                stats.get(&["coverage", &k, "triggered_compiled"]),
+            ));
+            continue;
+        }
         let c = |name: &str| stats.get(&["coverage", &k, name]);
         rows.insert(
             k.clone(),
@@ -411,6 +539,14 @@ pub fn summary(stats: &Stats) -> String {
         never.len(),
         never.join(", ")
     );
+    let _ = writeln!(
+        out,
+        "executed in the state a wrong implementation would answer differently in \
+         (programs; of them, in a compiled function other than the entry):"
+    );
+    for (k, all, compiled) in &triggers {
+        let _ = writeln!(out, "  {k:<36} {all:>8} {compiled:>10}");
+    }
     out
 }
 
@@ -436,6 +572,15 @@ mod tests {
         );
         assert!(m.executed.contains("Arith.Int.Mul"), "{:?}", m.executed);
         assert!(m.executed.contains("Arith.Int.Add"), "{:?}", m.executed);
+        assert!(
+            m.triggered.contains("Arith.Int.Add:overflow"),
+            "{:?}",
+            m.triggered
+        );
+        assert!(
+            !m.triggered_compiled.contains("Arith.Int.Add:overflow"),
+            "the overflow is in `main`, which runs encoded"
+        );
         let after: Vec<_> = m.present.difference(&m.executed).collect();
         assert!(
             !after.is_empty(),
