@@ -6438,3 +6438,188 @@ fn compiled_float_names(fixture: &Floats) -> Vec<String> {
         .filter(|name| !fixture.refused.contains(name))
         .collect()
 }
+
+/// The fixture of the tier-up cases ([ADR 0123]): a loop-free callee, a
+/// function with a loop that calls it, and two loop-free callers to reach
+/// each of them through a crossing — the outermost frame is always entered by
+/// the dispatch loop, so it is never what becomes hot.
+///
+/// `inc` calls itself on a branch no case takes, which keeps
+/// `cove_ir::lower::inline` from expanding it — or anything that calls it —
+/// into its caller, and so keeps every call a call.
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+const HOT: &str = "\
+export fn inc(x: Int) -> Int {
+  if x < 0 {
+    inc(x + 1)
+  } else {
+    x + 1
+  }
+}
+
+export fn once(n: Int) -> Int {
+  inc(n)
+}
+
+export fn incs(n: Int) -> Int {
+  var seen = 0
+  while seen < n {
+    seen = inc(seen)
+  }
+  seen
+}
+
+export fn callsIncs(n: Int) -> Int {
+  incs(n)
+}
+";
+
+/// The `FunctionId` of `m.<name>` in `program`.
+fn id_of(program: &cove_ir::Program, name: &str) -> cove_ir::FunctionId {
+    let at = program
+        .functions
+        .iter()
+        .position(|function| &*function.module == MODULE && &*function.name == name)
+        .unwrap_or_else(|| panic!("the fixture lowers `{name}`"));
+    cove_ir::FunctionId(at as u32)
+}
+
+/// Runs `name(n)` on the encoded VM, and then over `native` on a machine of
+/// its own, and answers both and the native run's crossings.
+fn over_table(
+    program: &Arc<cove_sema::resolve::Program>,
+    sources: &Arc<SourceMap>,
+    lowered: &cove_ir::Program,
+    native: &cove_runtime::NativeProgram,
+    name: &str,
+    n: i64,
+) -> (String, String, cove_runtime::Tiers) {
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::clone(&hosts));
+    let vm = Vm::new(&runtime, &hosts, lowered)
+        .invoke(MODULE, name, vec![Value::int(n)])
+        .expect("the VM answers")
+        .to_string();
+    let mut with = Vm::with_native(&runtime, &hosts, lowered, native);
+    let answered = with
+        .invoke(MODULE, name, vec![Value::int(n)])
+        .expect("the native tier answers")
+        .to_string();
+    (vm, answered, with.tiers())
+}
+
+/// The [`HOT`] fixture, lowered.
+fn hot_fixture() -> (
+    Arc<SourceMap>,
+    Arc<cove_sema::resolve::Program>,
+    Arc<cove_ir::Program>,
+) {
+    let (sources, program) = checked_source(HOT);
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    (sources, program, lowered)
+}
+
+/// **A loop-free function runs on the VM until it is hot, and as machine code
+/// from the call that makes it so** ([ADR 0123]). Nothing is compiled when
+/// the table is built, a function below the count is "not hot" and not
+/// refused, and every run answers what the VM answers.
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+#[test]
+fn a_loop_free_function_stays_on_the_vm_until_it_is_hot() {
+    cove_runtime::on_cove_stack(|| {
+        use cove_runtime::{TierUp, Tiered};
+        let (sources, program, lowered) = hot_fixture();
+        let hot = std::num::NonZeroU32::new(4).expect("not nought");
+        let native =
+            cove_runtime::compile_native_tiered(Arc::clone(&lowered), TierUp::AtCall(hot), false)
+                .expect("this host compiles");
+        let inc = id_of(&lowered, "inc");
+        assert_eq!(native.compiled(), 0, "nothing is compiled before a run");
+        assert_eq!(native.not_hot(), native.reachable());
+        for n in 0..3 {
+            let (vm, answered, tiers) =
+                over_table(&program, &sources, &lowered, &native, "once", n);
+            assert_eq!(answered, vm, "the same answer below the count");
+            assert_eq!(tiers.native(), 0, "and no machine code ran: {tiers:?}");
+            assert!(
+                native.entry(inc).is_none(),
+                "`inc` is not hot after {} call(s)",
+                n + 1
+            );
+        }
+        assert_eq!(
+            native.refused(),
+            0,
+            "a function that is not hot is not refused"
+        );
+        assert_eq!(native.compiled(), 0);
+
+        // The fourth call is the one that makes it hot, and it enters the code.
+        let (vm, answered, tiers) = over_table(&program, &sources, &lowered, &native, "once", 41);
+        assert_eq!(answered, vm);
+        assert_eq!(vm, "42");
+        assert!(
+            native.entry(inc).is_some(),
+            "`inc` is compiled at its fourth call"
+        );
+        assert_eq!(tiers.vm_to_native, 1, "and that call entered it: {tiers:?}");
+        assert_eq!(native.compiled(), 1);
+        assert_eq!(native.not_hot(), native.reachable() - 1);
+    })
+    .expect("a thread to run Cove on");
+}
+
+/// **A function with a loop is compiled at its first call**, because one call
+/// of it may run as long as its loop and nothing moves a running frame onto
+/// the tier ([ADR 0123]). Its loop-free callee is counted from compiled code
+/// as from the VM, and stays on the VM below the count. Eagerly, every
+/// function is compiled before the run.
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+#[test]
+fn a_function_with_a_loop_is_compiled_at_its_first_call() {
+    cove_runtime::on_cove_stack(|| {
+        use cove_runtime::{TierUp, Tiered};
+        let (sources, program, lowered) = hot_fixture();
+        let hot = std::num::NonZeroU32::new(1000).expect("not nought");
+        let native =
+            cove_runtime::compile_native_tiered(Arc::clone(&lowered), TierUp::AtCall(hot), false)
+                .expect("this host compiles");
+        let (vm, answered, tiers) =
+            over_table(&program, &sources, &lowered, &native, "callsIncs", 100);
+        assert_eq!(answered, vm);
+        assert_eq!(vm, "100");
+        assert!(
+            native.entry(id_of(&lowered, "incs")).is_some(),
+            "the loop is compiled"
+        );
+        assert!(
+            native.entry(id_of(&lowered, "inc")).is_none(),
+            "its callee is not hot"
+        );
+        assert_eq!(
+            tiers.vm_to_native, 1,
+            "the first call entered the loop: {tiers:?}"
+        );
+        assert_eq!(
+            tiers.native_to_vm, 100,
+            "which called back to the VM: {tiers:?}"
+        );
+
+        let eager = cove_runtime::compile_native_tiered(Arc::clone(&lowered), TierUp::Eager, false)
+            .expect("this host compiles");
+        assert!(eager.entry(id_of(&lowered, "inc")).is_some());
+        assert!(eager.entry(id_of(&lowered, "once")).is_some());
+        assert_eq!(eager.not_hot(), 0);
+        let (vm, answered, tiers) =
+            over_table(&program, &sources, &lowered, &eager, "callsIncs", 100);
+        assert_eq!(answered, vm);
+        assert_eq!(tiers.native_to_vm, 0, "every call is native: {tiers:?}");
+    })
+    .expect("a thread to run Cove on");
+}
