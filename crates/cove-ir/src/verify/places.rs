@@ -412,7 +412,19 @@ impl Needs {
         let mut refused: BTreeSet<(usize, String)> = BTreeSet::new();
         // To a fixed point: a part's need, a copy's and an argument's flow to
         // what reached them, and a need may be learned after it was passed on.
-        loop {
+        // Bounded as `settle` is: a part taken of its own source round a loop
+        // grows a need by its offset every round, and would reach `REACH` only
+        // after as many rounds as the frame has words.
+        for round in 0.. {
+            if round == ROUNDS {
+                refused.insert((
+                    0,
+                    "the uses of an address do not settle: a place is offset further every time \
+                     round a loop, and its reach cannot be bounded"
+                        .to_string(),
+                ));
+                break;
+            }
             let mut changed = false;
             for (pc, inst) in function.code.iter().enumerate() {
                 let before = &reaching[pc];
