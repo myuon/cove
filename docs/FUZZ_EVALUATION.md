@@ -217,8 +217,189 @@ interpreter's.
 **Not measured here:** that a root the collector *missed* would change those
 lines. That is section 4's question.
 
+## 4. Artificial defects
+
+Four defects, written into the runtime or the code generator on purpose, and
+whether the harness noticed — by three routes reported apart. **What a mutant
+measures is whether that defect is detected, not how often an unknown one
+would be**: four hand-picked defects are not a sample of the bugs nobody has
+seen.
+
+### How
+
+Each mutant is a patch, `fuzz/mutants/<name>.patch`, marked `COVE-MUTANT
+<name>`. `scripts/fuzz-mutant.sh apply <name>` makes a detached worktree of the
+current commit under `fuzz/measure/mutants/` (ignored by git) and applies it
+there; `revert` deletes the worktree; `check` — a step of CI's main job —
+fails if a mutant is applied in the tree being tested or no longer applies.
+A patch rather than a cfg or a feature, because a cfg is code that ships in
+every build, one flag from being on; a patch has to be applied by hand, to a
+copy, to exist at all.
+
+`scripts/fuzz-mutant-experiment.sh <name> --replay T=DIR... --explore T=DIR...`
+is the whole experiment, and `fuzz/measure/mutation/<name>/report.txt` its
+record:
+
+1. **dedicated tests**, in the mutant's worktree: `cove-fuzz`'s `gc_roots`
+   and `regressions`, `cove-native`'s `template` (111 cases), `cove-runtime`'s
+   `native_tier` (75), with `--features template`;
+2. **corpus replay**: `cove-fuzz stats` built with the mutant over corpora
+   that existed before the experiment — the committed seeds and regressions
+   (`known/` left out), the `differential_source` starting corpus as it was
+   before section 3's seeds, and the baseline campaign's grown corpora
+   (section 1);
+3. **new exploration**: `scripts/fuzz-measure.sh <target> 300 --runs 3
+   --fork 4 --until-finding`, seeds 1–3, without ASan, from the baseline's
+   starting corpus (8 inputs for `differential`, 413 for
+   `differential_source`, **without** section 3's seeds) **with every input
+   the replays found the mutant with taken out** — a known reproducer is never
+   counted as found again. Each finding is replayed on the clean build: one
+   that fails there too is the toolchain's, not the mutant's.
+
+The clean tree passes all of it: the gate's `cargo test` and the baseline
+campaign's 15 sessions found nothing (section 1).
+
+Measured 2026-10-26, on the mutants applied to `ce8c4dd`–`d8e6261` (this
+branch; the code they mutate is the same in each), on the machine of the
+setup.
+
+| mutant | what it breaks | dedicated tests | corpus replay | new exploration, 3 × 300 s, `-fork=4` |
+|---|---|---|---|---|
+| `001-native-int-lt-is-le` | native `Int` `<` answers `<=`, in every form `Emit::compare` emits (stored, immediate, fused with a branch) | **detected**: `gc_roots` 1, `template` 3 of 111, `native_tier` 33 of 75 failed | **detected**: every committed `differential` and `differential_source` seed; 1,715–1,953 of ~2,000 of each `differential` corpus, 319–465 of ~2,200 `differential_source`, 323 of 1,010 `ir_mutate`, 346 of 1,075 `image`; 0 of 4,288 `ir` | `differential`: every starting input found it, so it started empty, and the first program the generator made found it (0–1 s, all three seeds); `differential_source`: 25 s, 242 s, 48 s |
+| `002-native-int-mul-unchecked` | native `Int` `*` wraps instead of trapping on overflow | **detected** by `template` only (3 of 111: `every_arithmetic_failure_is_the_vms`, `an_immediate_operand_fails_the_same_way`, `a_duration_destination_renames_only_three_overflows`); `gc_roots`, `regressions`, `native_tier` pass | **not** by any committed seed or regression; 4–7 of ~2,000 of each `differential` corpus; 1 of 1,075 `image`; **0** of every `differential_source`, `ir`, `ir_mutate` corpus | `differential`: 32 s, 277 s, and 300 s (the last second of its budget); `differential_source`: **not detected** in any of the three |
+| `003-gc-innermost-frame-under-compiled-code` | a collection under compiled code does not walk the innermost frame's references | **detected**: `gc_roots` (5 of its 6 programs; see below), `native_tier` 2 of 75; `template` passes | **detected**: 5 of section 3's 6 seeds; before them, 0 of the 3 `differential_source` seeds and regressions, 1 of 8 `differential` (`random-192`); 21 of 413 of the old starting corpus; 26–62 of ~2,000 `differential`, 42–119 of ~2,200 `differential_source`, 92 of 1,010 `ir_mutate`, 43 of 1,075 `image`, 5 of 4,288 `ir` | `differential`: 21 s, 6 s, 12 s; `differential_source`: 73 s in one session, nothing in 300 s in another, and the third was **stopped at 76 s by an unrelated finding** (below) |
+| `004-gc-interior-addresses` | a collection does not walk frames' addresses into heap objects (ADR 0120's interior roots), on either tier | **not detected** | **not detected** in any corpus | **not detected**: `differential` 0 of 3; `differential_source` 0 of 2, the third **stopped at 124 s by an unrelated finding** |
+
+Two of the exploration sessions stopped on something the mutant did not do:
+replayed on the clean build, both inputs fail there too. They are the
+toolchain's own bugs, found by this measurement and kept under
+`fuzz/regressions/differential_source/known/`: a module-level `fn f(self)`
+that the checker accepts and the interpreter refuses to call while the VM runs
+it ([#720](https://github.com/myuon/cove/issues/720)), and `!` on the `Any`
+that `clock.timeout` answers, which the checker accepts and the lowering then
+panics on ([#721](https://github.com/myuon/cove/issues/721)). Neither is
+counted as a detection of a mutant, and both sessions are reported as not
+having run their budget out. They also say what the baseline's "0
+mismatches" was worth: the baseline's three `differential_source` sessions,
+from almost the same starting corpus, found neither.
+
+### Where each route came from, and why the misses missed
+
+**Measured**, with section 2's coverage replay extended to the comparisons
+fused with a branch and with an immediate (`cove-fuzz coverage`, over the
+seed-1 corpora):
+
+- **001 was reached everywhere.** A counted loop's test is a `CmpImmBranch` or
+  `CmpBranch` `<` whose operands are equal on its last iteration: in compiled
+  code in 1,795 and 1,692 of 2,026 `differential` programs and 392 and 352 of
+  604 `differential_source` programs. The detection counts match that
+  (1,863 of 2,026; 354 of the corpus's 2,196 inputs, of which 604 run). The
+  stored-answer `Cmp.Int.Lt` with equal operands alone — which this mutant was
+  first written to break, by mistake — runs in compiled code in 40 of 2,026.
+  On `ir` nothing runs in compiled code (section 1), and 0 of 4,288 found it.
+- **002 is the state the generator rarely makes in compiled code.** An
+  overflowing `Arith.Int.Mul` or `ArithImm.Mul` executed in compiled code in
+  7, 6 and 4 programs of the three `differential` corpora; the replay found
+  the mutant with 7, 5 and 4 of them. In every `differential_source` corpus
+  that state occurred in compiled code in **0** programs, and the replay and
+  all three explorations missed — **the defect's trigger state was never
+  made**, not made and missed. In `differential` the overflowing products are
+  mostly in `main` (25 programs against 3 in compiled functions in seed 1's
+  corpus), which runs on the encoded tier.
+- **003 is reached by a collection while the frame that allocated holds the
+  last reference to what it reads next.** Section 3's six programs measure it:
+  the five whose holder allocates in its own frame found it; the sixth,
+  `gc-root-string-callee`, whose holder calls a compiled callee to allocate —
+  so the holder is not the innermost frame — passed, as the mutant's
+  definition says it must. That is section 3's oracle working as designed,
+  and also the first measurement that one of the six shapes is blind to a
+  defect the others catch.
+- **004 cannot misbehave on what the lowering writes.** The source targets'
+  interior heap addresses come from `Shared.lock` (`lower/cells.rs`), which
+  holds the cell itself in a reference slot for as long as the address lives
+  ("an address into an object is live for exactly as long as the lock that
+  made it safe to hold"); dropping the interior root leaves the cell rooted.
+  `AddrOfField` executed in 2 of 604 `differential_source` programs and 2 of
+  498 `image` programs, in compiled code in none. On `ir`, which can write an
+  interior address with no other root, `AddrOfField` executed in 58 programs
+  — not in compiled code, and whether any of them collected while that
+  address was the only root is **not measured**. So: in the source targets,
+  *the defect's state cannot arise* (inferred from the lowering, consistent
+  with no detection); in `ir`, *not established*.
+
+### Before and after section 3
+
+The only change between "before" and "after" is section 3's six seeds; the
+revision, settings, corpora and budget are otherwise the same.
+
+| | before (the starting corpus without them) | after (the committed seeds with them) |
+|---|---|---|
+| `003` found by a committed `differential_source` seed or regression | 0 of 3 | 5 of 9 |
+| `003` found by replaying `differential_source`'s starting corpus | 21 of 413 (all repository programs: benchmarks and examples that allocate in compiled frames) | — |
+| `003` found by `cargo t`'s dedicated test | none existed | `gc_roots` fails |
+| `001`, `002`, `004` found by the six | — | 001: all six (via the loops); 002, 004: none |
+
+**Measured:** the seeds turn mutant 003 from "found by replaying the
+repository corpus or by a fresh session within about a minute" into "found by
+`cargo t` and by the first replay of the committed seeds". **Inferred:** the
+same holds for a real defect of the same shape, and not for one of
+`gc-root-string-callee`'s shape, which none of the six would find.
+
+## 5. What to do next
+
+Evidence first, then the proposal. Ranked by what the measurements say is
+missing, not by what is imaginable.
+
+1. **Make the native modes of `ir` run compiled code** (*generation target
+   expansion* and *observation*). Measured: `ir` verifies 75,000–80,000
+   programs a session and the native tier ran compiled code in 47–431 of them;
+   in its corpus, not one `Call` and 4–30 `Alloc`s ran in compiled code;
+   mutants 001 and 002 were found by 0 of 4,288 `ir` inputs. The `ir`
+   target's `vm|native` and `vm-gc|native-gc` pairs compare the encoded VM
+   with itself. The cheapest change is in the generator: helpers that the
+   entry calls in a loop, so the work is in a frame the tier compiles; and
+   `ir::plausible_arg` should build an argument the entry accepts — 30% of
+   the programs that verify never start.
+2. **A run-to-completion generator profile for `differential`** (issue 706).
+   Measured: 33–51% of what runs succeeds in every mode; two traps are 33–49%
+   of `vm|native`'s full comparisons; mutant 002's trigger — an overflowing
+   product in compiled code — occurs in 0.2–0.35% of the corpus, mostly
+   because overflows are drawn in `main`. A profile that keeps boundary values
+   out of the path to the end, and puts the deliberate overflow, out-of-range
+   slice or allocation *after* the state it is meant to break and in a helper,
+   would raise both. Keep the current profile beside it: its traps are what
+   the trap paths are compared on.
+3. **Separate the small-heap pair's purpose from the rest** (*small heap / GC
+   conditions*). Measured: 3.7–5.9% of `vm-gc` runs run out of memory before
+   their first instruction, and the small-heap pairs are most of the empty
+   prefix comparisons. The fix is not to drop the out-of-memory comparison —
+   it is how a leak is caught between `vm-gc` and `native-gc` — but to size
+   the small heap from what the lowered program's literals need (so it starts)
+   and keep collections forced by a pacing chunk rather than by exhaustion.
+   Section 3's programs collect seven or eight times on 2^11 words because
+   they allocate *after* starting; the generator's programs do not.
+4. **More shapes of root, and an interior-root program** (*observation*).
+   Measured: one of the six shapes is blind to mutant 003, and mutant 004 is
+   unobservable from the source targets. A shape whose holder calls an
+   allocating callee *and* whose callee holds the last reference, and an `ir`
+   program holding only an interior address across a collection, would close
+   both; each is a few dozen lines in `gc_roots.rs`.
+5. **Not now: a larger plain budget, or stdlib re-checking speed.** Measured:
+   for every mutant found by exploration, the median time was under five
+   minutes on four workers; the two misses are a trigger state the generator
+   does not make (002 on sources) and one that cannot arise (004) — neither of
+   which more time fixes. `differential_source` spends 98% of its executions on
+   inputs the front end refuses, so speeding up the standard library's check
+   would raise its rate, but what it runs is what limits it.
+
 ## What is not known from these
 
+- How the four mutants' detection would move with a longer budget or more
+  seeds: three seeds of five minutes each is a spread, not a distribution.
+- Whether `ir` programs ever hold the only reference to an object in an
+  interior address across a collection (mutant 004 on `ir`).
+- Anything about the defects nobody has written: the detection of four
+  chosen mutants is not a detection rate.
 - Whether any of this would notice a defect: a count of what was compared is
   not a count of what a comparison would catch.
 - How a session's counts move with its length: every session here is three

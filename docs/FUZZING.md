@@ -514,7 +514,10 @@ outermost frame always runs encoded). For the instructions whose answer a
 plausible wrong implementation would get wrong only in one state, it also reads
 the operands (up to 256 times a site) and counts `<key>:<state>` as
 `triggered` and `triggered_compiled`: `Cmp.Int.<op>:equal`, two equal
-operands, where `<` and `<=` differ; `Arith.Int.<op>:overflow` and
+operands, where `<` and `<=` differ — and the same for the forms the code
+generator emits through the same template, `CmpImm.<op>`,
+`CmpBranch.Int.<op>` and `CmpImmBranch.<op>`, which a counted loop's test
+usually is; `Arith.Int.<op>:overflow` and
 `ArithImm.<op>:overflow`, an addition, subtraction or multiplication whose
 exact answer is not an `Int`, where checking and wrapping differ. The counts
 are of programs. What it
@@ -683,6 +686,31 @@ reference wrongly freed is visible only if its memory is reused and
 overwritten before the read. The loops allocate strings of the held values'
 size for that reason, and the mutation experiment in
 [FUZZ_EVALUATION.md](FUZZ_EVALUATION.md) measures whether it is enough.
+
+## What it detects: artificial defects
+
+`fuzz/mutants/*.patch` are defects written into the runtime and the code
+generator on purpose, to measure whether the harness notices them — by the
+dedicated tests, by replaying an existing corpus, and by a new session —
+and `scripts/fuzz-mutant-experiment.sh <name>` is the experiment.
+[FUZZ_EVALUATION.md](FUZZ_EVALUATION.md), section 4, has the method and the
+results. A mutant is never applied to this tree: `scripts/fuzz-mutant.sh
+apply` makes a scratch worktree under `fuzz/measure/` and applies it there,
+and `scripts/fuzz-mutant.sh check`, a step of CI's main job, fails if a
+mutant's marker is anywhere in the tree under test or a patch no longer
+applies.
+
+```console
+$ scripts/fuzz-mutant.sh list
+$ scripts/fuzz-mutant.sh apply 002-native-int-mul-unchecked
+$ scripts/fuzz-mutant.sh run 002-native-int-mul-unchecked -- cargo test --profile checked -p cove-native --features template --test template
+$ scripts/fuzz-mutant.sh revert 002-native-int-mul-unchecked
+```
+
+An exploration's finding is replayed on the clean build before it is
+counted: one that fails there too is the toolchain's own, which is how
+[#720](https://github.com/myuon/cove/issues/720) and
+[#721](https://github.com/myuon/cove/issues/721) were found.
 
 ## Triage, minimise, keep
 

@@ -1,0 +1,28 @@
+# 003-gc-innermost-frame-under-compiled-code
+#
+# A collection made while compiled code is live does not report the
+# reference slots of the innermost frame — the frame that asked for
+# the allocation — as roots. Wrong only when such a frame holds the
+# last reference to something it reads after the collection.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/exec.rs b/crates/cove-runtime/src/vm/exec.rs
+--- a/crates/cove-runtime/src/vm/exec.rs
++++ b/crates/cove-runtime/src/vm/exec.rs
+@@ -173,9 +173,12 @@
+     fn each_root(&self, f: &mut dyn FnMut(u64)) {
+         let machine = self.0;
+         let program = machine.program;
+-        for frame in &machine.frames {
++        // COVE-MUTANT 003-gc-innermost-frame-under-compiled-code
++        let innermost = machine.frames.len().wrapping_sub(1);
++        for (at, frame) in machine.frames.iter().enumerate() {
+             let function = program.function(frame.function);
+-            for slot in function.refs.iter() {
++            let dropped = machine.native_depth > 0 && at == innermost;
++            for slot in function.refs.iter().filter(|_| !dropped) {
+                 let word = machine.mem.slot(frame.base, slot);
+                 if word != 0 {
+                     f(word);

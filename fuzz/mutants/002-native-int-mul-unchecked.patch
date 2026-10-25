@@ -1,0 +1,22 @@
+# 002-native-int-mul-unchecked
+#
+# Native code does not test `Int` multiplication for overflow: it
+# answers the wrapped product where the VM traps. Wrong only on an
+# overflowing product.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -4284,7 +4284,8 @@
+             }
+             ArithOp::Mul => {
+                 self.imul_rr(RAX, RCX);
+-                self.raise_unless(CC_NO, overflow);
++                // COVE-MUTANT 002-native-int-mul-unchecked
++                let _ = overflow;
+                 self.store_slot(dst, RAX);
+             }
+             ArithOp::Div | ArithOp::Rem => {

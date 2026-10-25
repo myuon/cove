@@ -88,6 +88,9 @@ pub fn key(inst: &Inst) -> String {
         Inst::ArithImm { op, .. } => format!("ArithImm.{op:?}"),
         Inst::Cmp { on, op, .. } => format!("Cmp.{on:?}.{op:?}"),
         Inst::Neg { num, .. } => format!("Neg.{num:?}"),
+        Inst::CmpImm { op, .. } => format!("CmpImm.{op:?}"),
+        Inst::CmpBranch { on, op, .. } => format!("CmpBranch.{on:?}.{op:?}"),
+        Inst::CmpImmBranch { op, .. } => format!("CmpImmBranch.{op:?}"),
         other => format!("{:?}", crate::irgen::kind_of(other)),
     }
 }
@@ -224,6 +227,12 @@ fn has_trigger(inst: &Inst) -> bool {
             num: cove_ir::Num::Int,
             ..
         } | Inst::ArithImm { .. }
+            | Inst::CmpImm { .. }
+            | Inst::CmpBranch {
+                on: cove_ir::Compare::Int,
+                ..
+            }
+            | Inst::CmpImmBranch { .. }
     )
 }
 
@@ -258,6 +267,22 @@ pub fn trigger(inst: &Inst, slot: impl Fn(u32) -> Option<u64>) -> Option<String>
         Inst::ArithImm { op, a, value, .. } => {
             overflows(*op, int(*a)?, *value).then(|| format!("{}:overflow", key(inst)))
         }
+        // The comparison forms the code generator emits through the same
+        // template as `Cmp`: with an immediate, and fused with a branch.
+        Inst::CmpImm { op, a, value, .. } => (int(*a)? == *value
+            && !matches!(op, cove_ir::CmpOp::Order))
+        .then(|| format!("{}:equal", key(inst))),
+        Inst::CmpBranch {
+            on: cove_ir::Compare::Int,
+            op,
+            a,
+            b,
+            ..
+        } => (int(*a)? == int(*b)? && !matches!(op, cove_ir::CmpOp::Order))
+            .then(|| format!("{}:equal", key(inst))),
+        Inst::CmpImmBranch { op, a, value, .. } => (int(*a)? == i64::from(*value)
+            && !matches!(op, cove_ir::CmpOp::Order))
+        .then(|| format!("{}:equal", key(inst))),
         _ => None,
     }
 }
