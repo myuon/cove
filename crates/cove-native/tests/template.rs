@@ -273,8 +273,8 @@ fn an_observation_the_runtime_refused_leaves_with_that_outcome() {
 }
 
 #[test]
-fn the_cheap_observations_are_answered_inline() {
-    suite::the_cheap_observations_are_answered_inline::<Template>();
+fn the_type_observations_are_answered_inline_and_the_view_reads_are_not() {
+    suite::the_type_observations_are_answered_inline_and_the_view_reads_are_not::<Template>();
 }
 
 #[test]
@@ -288,8 +288,8 @@ fn an_identity_set_is_made_inline_and_entered_through_the_helper() {
 }
 
 #[test]
-fn a_child_is_answered_inline_from_the_child_table() {
-    suite::a_child_is_answered_inline_from_the_child_table::<Template>();
+fn a_child_is_handed_to_the_helper_which_validates_the_view() {
+    suite::a_child_is_handed_to_the_helper_which_validates_the_view::<Template>();
 }
 
 #[test]

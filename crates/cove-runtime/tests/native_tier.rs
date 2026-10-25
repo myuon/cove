@@ -5812,8 +5812,9 @@ fn a_view_held_across_a_collection_keeps_its_owner() {
 /// owner is one address on both, and a word that differs is a wrong view.
 ///
 /// Then a whole walk of the same value, counted: every child taken, and the
-/// `DynChild`s that reached the helper, which has to be fewer — so the fast
-/// path answered — and not none, so the helper still answers what it must.
+/// `DynChild`s that reached the helper, which has to be every one of them —
+/// ADR 0120: the tier answers no child inline, because the helper validates
+/// the view before projecting it.
 #[test]
 fn every_child_view_is_the_encoded_machine_s_word_for_word() {
     use cove_ir::bytecode::Op;
@@ -5917,7 +5918,7 @@ fn every_child_view_is_the_encoded_machine_s_word_for_word() {
         .parse()
         .expect("a count");
     assert!(
-        helped > 0 && helped < taken,
+        helped > 0 && helped == taken,
         "{helped} of {taken} children reached the helper"
     );
 }

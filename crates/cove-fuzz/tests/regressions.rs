@@ -74,6 +74,16 @@ fn image_replays() {
     replay("image");
 }
 
+#[test]
+fn ir_replays() {
+    replay("ir");
+}
+
+#[test]
+fn ir_mutate_replays() {
+    replay("ir_mutate");
+}
+
 /// Every target has seeds, so a target whose directory was renamed is
 /// noticed here rather than by a corpus that quietly started empty.
 #[test]

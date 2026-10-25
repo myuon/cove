@@ -5907,7 +5907,7 @@ pub(crate) mod tests {
                 .map(|(name, parts)| (Arc::from(*name), parts.clone()))
                 .collect();
             let (cases, payload) = cove_ir::enum_layout(&named, &self.program.layouts);
-            let mut words = vec![Repr::Int];
+            let mut words = vec![Repr::Tag];
             words.extend_from_slice(&payload);
             self.push(Layout::inline(name, Shape::Enum { cases, payload }, words))
         }
@@ -6038,7 +6038,34 @@ pub(crate) mod tests {
 
         /// Checks the program the way the lowering must, so a malformed test
         /// fixture fails as a fixture rather than as a machine bug.
-        pub(crate) fn done(self) -> Program {
+        pub(crate) fn done(mut self) -> Program {
+            // The program-wide layouts the machine allocates by must be the
+            // shapes they are named for, whether or not the fixture used them.
+            self.seed();
+            for (shape, name) in [
+                (Shape::Str, "String"),
+                (Shape::Bytes, "Bytes"),
+                (Shape::ByteBuffer, "ByteBuffer"),
+            ] {
+                let held = match shape {
+                    Shape::Str => self.program.str_layout,
+                    Shape::Bytes => self.program.bytes_layout,
+                    _ => self.program.buffer_layout,
+                };
+                let right = self
+                    .program
+                    .layouts
+                    .get(held.index())
+                    .is_some_and(|layout| layout.shape == shape);
+                if !right {
+                    let id = self.layout(name, shape.clone());
+                    match shape {
+                        Shape::Str => self.program.str_layout = id,
+                        Shape::Bytes => self.program.bytes_layout = id,
+                        _ => self.program.buffer_layout = id,
+                    }
+                }
+            }
             cove_ir::verify(&self.program).expect("a hand-written test program is well formed");
             self.program
         }
@@ -7703,7 +7730,7 @@ pub(crate) mod tests {
                 Repr::Bool,
                 // The `Msg` is at slots 1–3: a discriminant, `Text`'s
                 // reference and `Count`'s integer.
-                Repr::Int,
+                Repr::Tag,
                 Repr::Ref,
                 Repr::Int,
                 Repr::Ref,
@@ -7716,7 +7743,11 @@ pub(crate) mod tests {
                     layout: cell,
                     len: Len::Count(1200),
                 },
-                Inst::Int { dst: 1, value: 0 },
+                Inst::Tag {
+                    dst: 1,
+                    layout: msg,
+                    case: cove_ir::CaseId(0),
+                },
                 Inst::Copy {
                     dst: 2,
                     src: 4,
@@ -7734,7 +7765,11 @@ pub(crate) mod tests {
                     slot: 1,
                     layout: msg,
                 },
-                Inst::Int { dst: 1, value: 1 },
+                Inst::Tag {
+                    dst: 1,
+                    layout: msg,
+                    case: cove_ir::CaseId(1),
+                },
                 Inst::Int { dst: 3, value: 5 },
                 Inst::Alloc {
                     dst: 4,
@@ -7748,7 +7783,7 @@ pub(crate) mod tests {
         let program = build.done();
         assert_eq!(
             program.layout(msg).words,
-            vec![Repr::Int, Repr::Ref, Repr::Int]
+            vec![Repr::Tag, Repr::Ref, Repr::Int]
         );
 
         let mut kept = Machine::new(&program, 2048);
@@ -8531,6 +8566,9 @@ pub(crate) mod tests {
         let caller = build.function(
             "main",
             &[],
+            // Slot 0 of the outermost frame: the first word a run's stack
+            // holds a frame in, whose address is not the null place (ADR 0120's
+            // guard word, `mem::STACK_GUARD`).
             &[Repr::Int, Repr::Addr, Repr::Unit],
             int,
             vec![
@@ -10559,13 +10597,17 @@ pub(crate) mod tests {
         let body = build.lambda(
             "body",
             &[],
-            &[Repr::Int, Repr::Int],
+            &[Repr::Tag, Repr::Int],
             answer,
             &[],
             vec![
                 // `Err(9)`: the case index, then the payload word the case
                 // was placed at.
-                Inst::Int { dst: 0, value: 1 },
+                Inst::Tag {
+                    dst: 0,
+                    layout: answer,
+                    case: cove_ir::CaseId(1),
+                },
                 Inst::Int { dst: 1, value: 9 },
                 Inst::Return { src: 0 },
             ],

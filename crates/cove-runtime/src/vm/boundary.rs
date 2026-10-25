@@ -1554,7 +1554,7 @@ mod tests {
         let e = world.named("E");
         assert_eq!(
             world.program.layout(e).words,
-            vec![Repr::Int, Repr::Int, Repr::Ref, Repr::Float]
+            vec![Repr::Tag, Repr::Int, Repr::Ref, Repr::Float]
         );
         let mut machine = world.machine();
 
