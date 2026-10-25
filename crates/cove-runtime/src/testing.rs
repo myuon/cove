@@ -30,7 +30,7 @@ use crate::host::HostRegistry;
 use crate::interp::Interpreter;
 use crate::runtime::Runtime;
 use crate::value::Value;
-use crate::Vm;
+use crate::{PreparedProgram, Vm};
 
 /// The code a failing test is reported under.
 pub const FAILED: &str = "cove::test::failed";
@@ -72,10 +72,33 @@ pub struct TestFailure {
     pub denied_capability: Option<String>,
 }
 
+/// A test made ready to run: lowered and prepared, on the VM, and nothing on
+/// the interpreter, which lowers nothing.
+///
+/// A property — a `test fn` with parameters (ADR 0121) — runs once per
+/// generated case, and this is what lets it be lowered and encoded once for
+/// all of them: [`TestRun::prepare`] does the program-wide work, and
+/// [`TestRun::run_prepared`] runs one case with a registry, a machine and
+/// arguments of its own. Building each case's machine with [`Vm::new`]
+/// instead re-encodes the program per case, which measured 0.35 ms a case on
+/// a property whose body does nothing, against 0.003 ms on the interpreter.
+pub struct PreparedTest {
+    lowered: Option<PreparedProgram>,
+}
+
 impl TestRun<'_> {
     /// Runs `test` over `hosts`, answering its failure, or `None` when it
     /// passed.
     pub fn run(&self, test: &DeclaredTest, hosts: HostRegistry) -> Option<TestFailure> {
+        match self.prepare(test) {
+            Ok(prepared) => self.run_prepared(test, &prepared, hosts, Vec::new()),
+            Err(failure) => Some(*failure),
+        }
+    }
+
+    /// Lowers `test` for the VM, or answers the failure a test the lowering
+    /// refuses is reported as.
+    pub fn prepare(&self, test: &DeclaredTest) -> Result<PreparedTest, Box<TestFailure>> {
         // One root per lowering rather than the whole suite in one: a set of
         // roots is lowered to one answer, so one unlowerable test would
         // become every test's refusal. Per test, a construct the backend
@@ -89,32 +112,53 @@ impl TestRun<'_> {
                 test.module,
                 test.name,
             ) {
-                Ok(ir) => Some(ir),
+                Ok(ir) => Some(PreparedProgram::new(Arc::new(ir))),
                 Err(items) => {
-                    return Some(TestFailure {
+                    return Err(Box::new(TestFailure {
                         diagnostic: unlowered(test, &items),
                         denied_capability: None,
-                    })
+                    }))
                 }
             },
         };
+        Ok(PreparedTest { lowered })
+    }
 
+    /// Runs a prepared `test` over `hosts` with `args`, answering its
+    /// failure, or `None` when it passed.
+    ///
+    /// A test that declares no parameters is entered as an entry, exactly as
+    /// it always was, and `args` must be empty. A property is *invoked* with
+    /// `args` — the arguments its runner generated — through the same door an
+    /// embedder calls a function with values it built, so each one is held to
+    /// the parameter type the checker resolved before anything runs.
+    pub fn run_prepared(
+        &self,
+        test: &DeclaredTest,
+        prepared: &PreparedTest,
+        hosts: HostRegistry,
+        args: Vec<Value>,
+    ) -> Option<TestFailure> {
+        let invoked = !test.entry.decl.params.is_empty();
         let runtime = Runtime::new(
             Arc::clone(self.program),
             Arc::clone(self.sources),
             Arc::new(hosts),
         );
-        let (outcome, assertion) = match &lowered {
+        let budget = self
+            .limits
+            .as_ref()
+            .map(|limits| Budget::new(limits.clone()));
+        let (outcome, assertion) = match &prepared.lowered {
             Some(ir) => {
-                let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
-                let outcome = match &self.limits {
-                    Some(limits) => vm.run_entry_within(
-                        Budget::new(limits.clone()),
-                        test.module,
-                        test.name,
-                        Vec::new(),
-                    ),
-                    None => vm.run_entry(test.module, test.name, Vec::new()),
+                let mut vm = Vm::with_prepared(&runtime, runtime.hosts(), ir);
+                let outcome = match (budget, invoked) {
+                    (Some(budget), false) => {
+                        vm.run_entry_within(budget, test.module, test.name, Vec::new())
+                    }
+                    (None, false) => vm.run_entry(test.module, test.name, Vec::new()),
+                    (Some(budget), true) => vm.invoke_within(budget, test.module, test.name, args),
+                    (None, true) => vm.invoke(test.module, test.name, args),
                 };
                 let assertion = vm
                     .assertion_failure()
@@ -123,14 +167,15 @@ impl TestRun<'_> {
             }
             None => {
                 let mut interpreter = Interpreter::new(&runtime);
-                let outcome = match &self.limits {
-                    Some(limits) => interpreter.run_entry_within(
-                        Budget::new(limits.clone()),
-                        test.module,
-                        test.name,
-                        Vec::new(),
-                    ),
-                    None => interpreter.run_entry(test.module, test.name, Vec::new()),
+                let outcome = match (budget, invoked) {
+                    (Some(budget), false) => {
+                        interpreter.run_entry_within(budget, test.module, test.name, Vec::new())
+                    }
+                    (None, false) => interpreter.run_entry(test.module, test.name, Vec::new()),
+                    (Some(budget), true) => {
+                        interpreter.invoke_within(budget, test.module, test.name, args)
+                    }
+                    (None, true) => interpreter.invoke(test.module, test.name, args),
                 };
                 let assertion = interpreter
                     .assertion_failure()

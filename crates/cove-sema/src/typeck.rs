@@ -864,12 +864,16 @@ pub(crate) fn check_linked(
     (diagnostics, facts)
 }
 
-/// Checks every `test fn` against the one shape the test runner calls.
+/// Checks every `test fn` against the shapes the test runner calls.
 ///
-/// The runner passes nothing and reports the test's failure through its
-/// `Err`, so a test takes no parameters and returns `Result<Unit, Error>`.
-/// Anything else is rejected here rather than at run time, naming the shape
-/// that is required.
+/// The runner reports a test's failure through its `Err`, so a test returns
+/// `Result<Unit, Error>`. A test with parameters is a property
+/// ([ADR 0121](../../../docs/adr/0121-a-test-fn-may-take-parameters.md)): the
+/// runner generates each argument from its parameter's type, so every
+/// parameter has a type it can generate ([`Ty::is_generatable`]) and is an
+/// ordinary value — not `var`, not variadic — and the test binds no type
+/// parameter. Anything else is rejected here rather than at run time, naming
+/// what is required.
 fn check_tests(
     program: &Program,
     checked: &BTreeMap<&str, Checked<'_>>,
@@ -885,20 +889,58 @@ fn check_tests(
         };
         let shape = format!("write `test fn {}() -> Result<Unit, Error>`", test.name);
 
-        if let Some(param) = sig.params.first() {
+        if let Some(generic) = test.entry.decl.generics.first() {
             diagnostics.push(
                 Diagnostic::error(
                     TEST,
                     format!(
-                        "test `{}` declares {} parameter(s)",
+                        "test `{}` declares the type parameter `{}`",
                         test.qualified_name(),
-                        sig.params.len()
+                        generic.name.node
                     ),
                 )
-                .at(param.span)
-                .rule("A `test fn` takes no parameters: the test runner is its only caller, and it passes nothing.")
-                .help(shape.clone()),
+                .at(generic.name.span)
+                .rule("A `test fn` is called by the test runner, which supplies values and never types.")
+                .help("write the test at the concrete types it is about"),
             );
+        }
+
+        for param in &sig.params {
+            if param.is_var || param.variadic {
+                let marking = if param.is_var { "`var`" } else { "variadic" };
+                diagnostics.push(
+                    Diagnostic::error(
+                        TEST,
+                        format!(
+                            "test `{}` declares the {marking} parameter `{}`",
+                            test.qualified_name(),
+                            param.name
+                        ),
+                    )
+                    .at(param.span)
+                    .rule(GENERATED_PARAMETERS)
+                    .help(format!("write `{}: {}`", param.name, param.ty)),
+                );
+            } else if !param.ty.is_generatable() {
+                diagnostics.push(
+                    Diagnostic::error(
+                        TEST,
+                        format!(
+                            "test `{}` takes `{}: {}`, and `cove test` cannot generate a `{}`",
+                            test.qualified_name(),
+                            param.name,
+                            param.ty,
+                            param.ty
+                        ),
+                    )
+                    .at(param.span)
+                    .rule(GENERATED_PARAMETERS)
+                    .help(format!(
+                        "take a parameter of a type `cove test` generates — {GENERATABLE} — and build the `{}` from it in the test's body",
+                        param.ty
+                    )),
+                );
+            }
         }
 
         if sig.is_async {
@@ -930,6 +972,12 @@ fn check_tests(
         }
     }
 }
+
+/// The rule a property's parameter keeps, quoted on every refusal of one.
+const GENERATED_PARAMETERS: &str = "A `test fn` with parameters is a property: `cove test` generates each argument from its parameter's type, so each is an ordinary parameter of a type it can generate.";
+
+/// The types `cove test` generates, as a refusal names them.
+const GENERATABLE: &str = "`Int`, `String`, `Bool`, or an `Array` of one of those";
 
 /// Every module of `program`, each after the modules it imports from.
 ///
@@ -1355,6 +1403,21 @@ pub struct FnTy {
 }
 
 impl Ty {
+    /// Whether `cove test` can generate a value of this type, for a property's
+    /// parameter ([ADR 0121](../../../docs/adr/0121-a-test-fn-may-take-parameters.md)).
+    ///
+    /// `Int`, `String`, `Bool`, and an `Array` whose elements are generatable,
+    /// nested arrays included. The runner in `cove-cli` generates exactly
+    /// these, so this is the one place the set is written down: a type this
+    /// answers `true` for is one the runner must generate.
+    pub fn is_generatable(&self) -> bool {
+        match self {
+            Ty::Int | Ty::Str | Ty::Bool => true,
+            Ty::Array(element) => element.is_generatable(),
+            _ => false,
+        }
+    }
+
     fn func(is_async: bool, params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(Arc::new(FnTy {
             is_async,
@@ -11100,13 +11163,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_test_that_declares_a_parameter() {
-        let error = rejects("test fn passes(n: Int) -> Result<Unit, Error> {\n  Ok(())\n}\n");
+    fn accepts_a_property_over_every_generatable_type() {
+        accepts(
+            "test fn holds(n: Int, text: String, flag: Bool, items: Array<Int>, rows: Array<Array<String>>) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        );
+    }
+
+    #[test]
+    fn accepts_a_property_whose_parameter_names_an_alias_of_a_generatable_type() {
+        accepts(
+            "type Words = Array<String>\n\ntest fn holds(words: Words) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        );
+    }
+
+    #[test]
+    fn rejects_a_property_whose_parameter_cannot_be_generated() {
+        for (source, shown) in [
+            (
+                "test fn holds(x: Float) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+                "`x: Float`",
+            ),
+            (
+                "test fn holds(x: Option<Int>) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+                "`x: Option<Int>`",
+            ),
+            (
+                "test fn holds(x: Array<Float>) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+                "`x: Array<Float>`",
+            ),
+            (
+                "test fn holds(f: fn(Int) -> Int) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+                "`f: fn(Int) -> Int`",
+            ),
+            (
+                "struct Point {\n  x: Int\n}\n\ntest fn holds(p: Point) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+                "`p: Point`",
+            ),
+        ] {
+            let error = rejects(source);
+            assert_eq!(error.code, TEST, "{source}");
+            assert!(
+                error.message.contains(shown) && error.message.contains("cannot generate"),
+                "{source}: {}",
+                error.message
+            );
+            assert!(
+                error
+                    .help
+                    .as_deref()
+                    .is_some_and(|help| help.contains(GENERATABLE)),
+                "{source}: {:?}",
+                error.help
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_property_with_a_var_or_variadic_parameter() {
+        for source in [
+            "test fn holds(var n: Int) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+            "test fn holds(n: Int...) -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        ] {
+            let error = rejects(source);
+            assert_eq!(error.code, TEST, "{source}");
+            assert!(error.message.contains("parameter `n`"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn rejects_a_test_that_declares_a_type_parameter() {
+        let error = rejects("test fn holds<T>(n: Int) -> Result<Unit, Error> {\n  Ok(())\n}\n");
         assert_eq!(error.code, TEST);
-        assert!(error.message.contains("declares 1 parameter(s)"));
-        assert_eq!(
-            error.help.as_deref(),
-            Some("write `test fn passes() -> Result<Unit, Error>`")
+        assert!(
+            error.message.contains("type parameter `T`"),
+            "{}",
+            error.message
         );
     }
 

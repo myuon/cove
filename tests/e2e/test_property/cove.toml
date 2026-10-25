@@ -1,0 +1,2 @@
+# A package of properties, pinning what `cove test` generates, how it
+# shrinks a failing case, and what it reports (ADR 0121).
