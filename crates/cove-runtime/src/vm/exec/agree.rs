@@ -87,7 +87,11 @@ pub(crate) struct Tables {
     /// been loaded out of memory, by pc ascending —
     /// `cove_ir::verify::places::loaded_uses` — which
     /// [`Machine::frame_place`] holds to the frame the address lands in.
-    loaded: Box<[Box<[usize]>]>,
+    ///
+    /// Shared, because the native tier's subset asks the same question of
+    /// each function it compiles, and is handed this answer rather than
+    /// taking it again (issue #713).
+    pub(super) loaded: Arc<[Box<[usize]>]>,
 }
 
 /// [`Tables::signatures`]: words, interned.

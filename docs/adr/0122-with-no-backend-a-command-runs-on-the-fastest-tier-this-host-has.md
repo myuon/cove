@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-10-25
+- Superseded in part by [ADR 0123](0123-the-native-tier-compiles-what-is-hot.md):
+  Decision 3's "every case the interpreter is compared on is also run with
+  `--backend vm`", which the end-to-end suite now runs with `--backend native`
 - Decides: that a command that runs a Cove program and is given no
   `--backend` runs it on the fastest tier this build and this host have — the
   native tier of ADR 0055 where there is one (a default build on Unix x86-64,

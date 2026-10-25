@@ -59,7 +59,7 @@ use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::Http;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::testing::{Crossings, TestBackend, TestFailure, TestRun};
-use cove_runtime::{NativeProgram, Tiers};
+use cove_runtime::{NativeProgram, TierUp, Tiers};
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
@@ -93,6 +93,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
     let mut backend = Backend::default_for_a_run();
+    let mut named = false;
     let mut seed: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
@@ -132,6 +133,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
                     cove_runtime::native_available()
                         .map_err(|unavailable| CliError::Message(unavailable.to_string()))?;
                 }
+                named = true;
                 i += 1;
             }
             other => path = Some(Path::new(other)),
@@ -169,6 +171,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             &sources,
             &program,
             backend,
+            crate::tier_up(named),
             properties,
             &mut tiers,
         ) {
@@ -226,6 +229,7 @@ fn run_test(
     sources: &Arc<SourceMap>,
     program: &Arc<cove_sema::resolve::Program>,
     backend: Backend,
+    tier_up: cove_runtime::TierUp,
     properties: Properties,
     tiers: &mut SuiteTiers,
 ) -> Result<Option<u32>, Box<Diagnostic>> {
@@ -278,7 +282,7 @@ fn run_test(
         backend: match backend {
             Backend::Ast => TestBackend::Ast,
             Backend::Vm => TestBackend::Vm,
-            Backend::Native => TestBackend::Native,
+            Backend::Native => TestBackend::Native(tier_up),
         },
         limits: None,
     };
@@ -286,20 +290,24 @@ fn run_test(
     let prepared = run
         .prepare(test)
         .map_err(|failure| Box::new(explained(*failure)))?;
-    // Compiled once, in `prepare`, for this test and every case of it.
+    // One table, built in `prepare`, for this test and every case of it. What
+    // it compiled is read after the last run, because a table that compiles as
+    // functions become hot compiles during the runs (ADR 0123).
     let native = prepared.native();
-    if let Some(native) = native {
-        tiers.compiled(native);
-    }
+    let mut runs = Vec::new();
     let mut counted = |(failure, crossings): (Option<TestFailure>, Option<Crossings>)| {
-        if let (Some(native), Some(crossings)) = (native, crossings) {
-            tiers.ran(native, &crossings);
+        if let Some(crossings) = crossings {
+            runs.push(crossings);
         }
         failure
     };
     if test.entry.decl.params.is_empty() {
         let outcome = run.run_prepared_counting(test, &prepared, registry, Vec::new());
-        return match counted(outcome) {
+        let failure = counted(outcome);
+        if let Some(native) = native {
+            tiers.compiled(native, &runs);
+        }
+        return match failure {
             None => Ok(None),
             Some(failure) => Err(Box::new(explained(failure))),
         };
@@ -319,6 +327,9 @@ fn run_test(
             args.iter().map(Arg::value).collect(),
         ))
     });
+    if let Some(native) = native {
+        tiers.compiled(native, &runs);
+    }
     match verdict {
         Verdict::Passed { cases } => Ok(Some(cases)),
         Verdict::Failed {
@@ -525,6 +536,11 @@ pub(crate) struct SuiteTiers {
     reachable: usize,
     compiled: usize,
     refused: usize,
+    /// Functions not called often enough, in their test, to be compiled — which
+    /// are not refusals (ADR 0123).
+    not_hot: usize,
+    /// When the tables compiled: one policy for a suite.
+    policy: Option<TierUp>,
     compile: Duration,
     tiers: Tiers,
     /// Runs whose outermost frame — the test function itself — was entered
@@ -539,23 +555,35 @@ pub(crate) struct SuiteTiers {
 
 impl SuiteTiers {
     /// One test's table, compiled.
-    fn compiled(&mut self, native: &NativeProgram) {
+    /// One test's table, after its last run, and every run made over it: one
+    /// for an ordinary test, one per case for a property.
+    ///
+    /// After rather than before, because a table that compiles as functions
+    /// become hot compiles during the runs (ADR 0123), and what it compiled
+    /// and refused is known only once they are over.
+    fn compiled(&mut self, native: &NativeProgram, runs: &[Crossings]) {
         self.tests += 1;
+        self.policy = Some(native.policy());
         self.reachable += native.reachable();
         self.compiled += native.compiled();
-        self.refused += native.refused();
+        self.not_hot += native.not_hot();
         self.compile += native.compile_time();
-        for row in native.refusals() {
+        let refusals = native.refusals();
+        self.refused += refusals.len();
+        for row in &refusals {
             self.reasons
                 .entry(row.reason.clone())
                 .or_default()
                 .entry(row.name.clone())
                 .or_default();
         }
+        for crossings in runs {
+            self.ran(&refusals, crossings);
+        }
     }
 
     /// One run over that table.
-    fn ran(&mut self, native: &NativeProgram, crossings: &Crossings) {
+    fn ran(&mut self, refusals: &[cove_runtime::Refused], crossings: &Crossings) {
         self.runs += 1;
         let (sum, run) = (&mut self.tiers, crossings.tiers);
         sum.vm_to_vm += run.vm_to_vm;
@@ -569,7 +597,7 @@ impl SuiteTiers {
         if run.host_to_native > 0 {
             self.outermost_native += 1;
         }
-        for row in native.refusals() {
+        for row in refusals {
             let made = crossings
                 .refused_calls
                 .get(row.id.index())
@@ -597,17 +625,37 @@ impl SuiteTiers {
             0 => 0.0,
             whole => 100.0 * self.compiled as f64 / whole as f64,
         };
-        let _ = writeln!(
-            out,
-            "native: {} test(s) compiled once each: {} of {} reachable function(s) compiled \
-             ({:.1}%), {} refused; compilation {:.1} ms",
-            self.tests,
-            thousands(self.compiled as u64),
-            thousands(self.reachable as u64),
-            share,
-            thousands(self.refused as u64),
-            self.compile.as_secs_f64() * 1000.0,
-        );
+        match self.policy {
+            Some(TierUp::AtCall(hot)) => {
+                let _ = writeln!(
+                    out,
+                    "native: {} test(s), one table each, a function compiled at its call number \
+                     {}: {} of {} reachable function(s) compiled ({:.1}%), {} refused, {} not hot; \
+                     compilation {:.1} ms",
+                    self.tests,
+                    hot,
+                    thousands(self.compiled as u64),
+                    thousands(self.reachable as u64),
+                    share,
+                    thousands(self.refused as u64),
+                    thousands(self.not_hot as u64),
+                    self.compile.as_secs_f64() * 1000.0,
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "native: {} test(s) compiled once each: {} of {} reachable function(s) \
+                     compiled ({:.1}%), {} refused; compilation {:.1} ms",
+                    self.tests,
+                    thousands(self.compiled as u64),
+                    thousands(self.reachable as u64),
+                    share,
+                    thousands(self.refused as u64),
+                    self.compile.as_secs_f64() * 1000.0,
+                );
+            }
+        }
         let tiers = self.tiers;
         let _ = writeln!(
             out,
@@ -764,6 +812,7 @@ mod tests {
                     &sources,
                     &program,
                     backend,
+                    TierUp::Eager,
                     Properties::default(),
                     tiers,
                 );
@@ -839,6 +888,7 @@ mod tests {
                 &sources,
                 &program,
                 backend,
+                TierUp::Eager,
                 Properties::default(),
                 &mut SuiteTiers::default(),
             )
@@ -876,6 +926,7 @@ mod tests {
                 &sources,
                 &program,
                 backend,
+                TierUp::Eager,
                 Properties::default(),
                 &mut SuiteTiers::default(),
             )
@@ -1023,6 +1074,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &sources,
             &program,
             Backend::Vm,
+            TierUp::Eager,
             Properties::default(),
             &mut SuiteTiers::default(),
         )
@@ -1180,6 +1232,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
                 &sources,
                 &program,
                 Backend::Vm,
+                TierUp::Eager,
                 Properties { cases, seed },
                 &mut SuiteTiers::default(),
             )

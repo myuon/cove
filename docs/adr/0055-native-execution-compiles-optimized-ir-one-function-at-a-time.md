@@ -2,6 +2,11 @@
 
 - Status: Accepted
 - Date: 2026-09-13
+- Superseded in part by [ADR 0123](0123-the-native-tier-compiles-what-is-hot.md):
+  its "The first implementation does not have a hotness counter" and "it may
+  eagerly compile every supported reachable function or compile a function on
+  its first call". A run the default puts on the tier now compiles a function
+  when it is hot; a named `--backend native` still compiles eagerly
 - Supersedes nothing. [ADR 0012](0012-performance-gate-and-native-backend.md)
   decided that compiling anything waits on a measured gate rather than an
   argument, and that gate is now crossed by a representative Cove program

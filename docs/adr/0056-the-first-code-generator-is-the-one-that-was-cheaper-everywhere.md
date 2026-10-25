@@ -7,6 +7,10 @@
   harness are kept"** and nothing else decided here. The choice of the
   hand-written template compiler as the native tier's code generator, and every
   measurement below that justified it, stand as written
+- Superseded in part by [ADR 0123](0123-the-native-tier-compiles-what-is-hot.md):
+  its "Compile latency is 5.4 µs a function, which makes ADR 0055's 'compile
+  every supported reachable function eagerly' cheap enough not to need a
+  hotness counter". The choice of the template compiler stands
 - Date: 2026-09-13
 - Decides: which code generator the native tier uses first, now that both
   candidates have been measured on the same IR

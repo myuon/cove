@@ -664,8 +664,25 @@ impl Jit {
     /// code is also written to `DIR` raw, and its IR beside it — see the
     /// private `dump` below, named without a link because it is private.
     pub fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Compiled> {
+        self.compile_given(program, id, None)
+    }
+
+    /// [`Jit::compile`], with `loaded` the function's
+    /// `cove_ir::verify::places::loaded_uses` where the caller already has it,
+    /// so that the subset is decided without that analysis being run again —
+    /// see [`crate::supported_given`].
+    pub fn compile_given(
+        &mut self,
+        program: &Program,
+        id: FunctionId,
+        loaded: Option<&[usize]>,
+    ) -> Option<Compiled> {
         let function = program.function(id);
-        if !supported(program, function) {
+        let supported = match loaded {
+            Some(loaded) => crate::supported_given(program, function, loaded),
+            None => supported(program, function),
+        };
+        if !supported {
             return None;
         }
         self.agreements.over(program);

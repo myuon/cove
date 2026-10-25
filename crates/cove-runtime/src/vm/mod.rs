@@ -170,8 +170,10 @@ pub struct PreparedProgram {
     program: Arc<Program>,
     prepared: exec::Prepared,
     /// The program's machine code, when it was compiled with
-    /// [`PreparedProgram::with_native`]: compiled once, for every run built
-    /// from this preparation, on any thread ([ADR 0085]).
+    /// [`PreparedProgram::with_native`] or
+    /// [`PreparedProgram::with_native_tiered`]: one table, for every run built
+    /// from this preparation, on any thread ([ADR 0085]). A function is
+    /// compiled once, before the runs or when it becomes hot in one of them.
     ///
     /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
     native: Option<Arc<crate::native::NativeProgram>>,
@@ -218,8 +220,37 @@ impl PreparedProgram {
     /// no native tier — the capability diagnostic, never a fallback.
     ///
     /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
-    pub fn with_native(mut self) -> Result<PreparedProgram, cove_native::Unavailable> {
-        let native = crate::native::compile(&self.program)?;
+    pub fn with_native(self) -> Result<PreparedProgram, cove_native::Unavailable> {
+        self.with_native_tiered(crate::TierUp::Eager, false)
+    }
+
+    /// This preparation with a native tier that compiles under `policy` — for
+    /// [`TierUp::AtCall`](crate::TierUp::AtCall), each function at the call
+    /// that makes it hot, during the runs built from it ([ADR 0123]) — and
+    /// against the counting helpers when `counting` asks, as
+    /// [`crate::compile_native_counting`] does.
+    ///
+    /// [`PreparedProgram::with_native`] is this under
+    /// [`TierUp::Eager`](crate::TierUp::Eager). Either way the program is not
+    /// verified a second time: this preparation already asked.
+    ///
+    /// # Errors
+    ///
+    /// As [`PreparedProgram::with_native`].
+    ///
+    /// [ADR 0123]: ../../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+    pub fn with_native_tiered(
+        mut self,
+        policy: crate::TierUp,
+        counting: bool,
+    ) -> Result<PreparedProgram, cove_native::Unavailable> {
+        let native = crate::native::compile_prepared(
+            &self.program,
+            policy,
+            counting,
+            self.prepared.is_verified(),
+            self.prepared.loaded_uses(),
+        )?;
         self.native = Some(Arc::new(native));
         Ok(self)
     }

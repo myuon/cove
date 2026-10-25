@@ -85,8 +85,12 @@
 //! the report a native run prints on stderr to say what ran where is not part
 //! of it: it is taken out of every run before anything is compared (see
 //! [`without_native_report`]). Where the default is native, every case the
-//! interpreter is compared on is also run with `--backend vm` and held to the
-//! same answer, so neither tier's coverage depends on which host ran the suite.
+//! interpreter is compared on is also run with `--backend native` and held to
+//! the same answer. Since ADR 0123 the default compiles a function only once
+//! it is hot, so a short case's default run is mostly the encoded VM; the
+//! named tier compiles every function before the first instruction, which is
+//! what keeps the code generator's coverage here. The VM alone is the default
+//! in CI's `--no-default-features` run of this suite, against the same files.
 //!
 //! A case with a `command` file names its own invocation and is run once.
 //! That is how a case that is *about* one of them — `backend_vm`,
@@ -315,15 +319,19 @@ fn every_case_matches_its_golden_files() {
         }
         // Where the default is the native tier — a binary with the code
         // generator on a host it runs on (the expression is `cove-runtime`'s
-        // `tests/native_tier.rs`'s) — the encoded VM is run by name and held to
-        // the same answer, so the golden files are both tiers' (ADR 0122).
+        // `tests/native_tier.rs`'s) — the tier is also run by name, which
+        // compiles every function before the run (ADR 0123), and held to the
+        // same answer: the default compiles only what is hot, which in a short
+        // case is little, so this is the run that holds the code generator to
+        // the golden files (ADR 0122).
         if cfg!(all(feature = "template", target_arch = "x86_64", unix))
             && case.compares_both_backends()
         {
-            let vm = case.run_with(&root, &["--backend", "vm"]);
-            if let Some(difference) = actual.differs_from(&vm) {
+            let native = case.run_with(&root, &["--backend", "native"]);
+            if let Some(difference) = actual.differs_from(&native) {
                 failures.push(format!(
-                    "case `{name}`: the native tier and the encoded VM do not agree\n{difference}"
+                    "case `{name}`: the default run and the eagerly compiled native tier do not \
+                     agree\n{difference}"
                 ));
             }
         }

@@ -750,6 +750,18 @@ pub fn supported(program: &Program, function: &Function) -> bool {
     refusal(program, function).is_none()
 }
 
+/// [`supported`], with `loaded` the answer
+/// `cove_ir::verify::places::loaded_uses` gives for `function`, which a
+/// caller that has already asked hands over rather than have it asked again.
+///
+/// That analysis is most of what deciding a function costs: measured on
+/// `cove test` in `tools/covefmt/`, 126 ms of the 215 ms a run spent
+/// compiling, and the encoded machine's preparation had already taken it for
+/// every function ([issue #713](https://github.com/myuon/cove/issues/713)).
+pub fn supported_given(program: &Program, function: &Function, loaded: &[usize]) -> bool {
+    refusal_given(program, function, loaded).is_none()
+}
+
 /// The reason a function is refused whole, before any instruction is looked
 /// at, or `None` if none of those coarse reasons apply.
 ///
@@ -795,8 +807,16 @@ pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
         return Some(whole);
     }
     let loaded = cove_ir::verify::places::loaded_uses(program, function);
+    refusal_given(program, function, &loaded)
+}
+
+/// [`refusal`], with `loaded` handed over as [`supported_given`] takes it.
+pub fn refusal_given(program: &Program, function: &Function, loaded: &[usize]) -> Option<Refusal> {
+    if let Some(whole) = whole_function_refusal(function) {
+        return Some(whole);
+    }
     function.code.iter().enumerate().find_map(|(pc, inst)| {
-        loaded_refused(&loaded, pc)
+        loaded_refused(loaded, pc)
             .or_else(|| inst_refused(program, function, inst))
             .map(|reason| Refusal {
                 reason,

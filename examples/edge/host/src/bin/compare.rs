@@ -219,7 +219,8 @@ fn compare() {
             ),
         }
         if let Some(native) = &native {
-            let refused: Vec<&str> = native.refusals().iter().map(|r| r.name.as_str()).collect();
+            let refusals = native.refusals();
+            let refused: Vec<&str> = refusals.iter().map(|r| r.name.as_str()).collect();
             println!(
                 "        {:<17} native: {} of {} reachable fn compiled; refused: {}",
                 case.label,

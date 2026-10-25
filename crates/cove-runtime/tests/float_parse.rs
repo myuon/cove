@@ -225,11 +225,8 @@ impl Subject {
             Arc::clone(&hosts),
         );
         let native = cove_runtime::compile_native(&self.lowered).expect("this host compiles");
-        let refused: Vec<&str> = native
-            .refusals()
-            .iter()
-            .map(|row| row.name.as_str())
-            .collect();
+        let refusals = native.refusals();
+        let refused: Vec<&str> = refusals.iter().map(|row| row.name.as_str()).collect();
         assert!(
             !refused.contains(&"m.parses"),
             "`parses` is meant to be compiled, and the tier refused it"

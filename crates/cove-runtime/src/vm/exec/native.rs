@@ -77,7 +77,7 @@
 //! [ADR 0055]: ../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use cove_ir::{ArgsId, FunctionId, Inst, LayoutId, Slot, Storage};
 use cove_native::{
@@ -101,12 +101,17 @@ use crate::error::RuntimeError;
 ///
 /// # `Send + Sync`
 ///
-/// A table is read, never written, once it is installed: [`Tiered::entry`] and
-/// [`Tiered::table`] take `&self`, and what they answer — an entry point and a
-/// slice of them — is a function pointer into pages that are executable and no
-/// longer writable by then. So reading one from two threads, or from a thread
-/// other than the one that built it, reads the same immutable bytes, and the
-/// bounds say so where a run can check them.
+/// A table is read through `&self` once it is installed: [`Tiered::entry`] and
+/// [`Tiered::table`] answer an entry point and a slice of [`EntryCell`]s, and
+/// an entry is a function pointer into pages that are executable and no longer
+/// writable by then. The one thing that may change is that an empty cell is
+/// filled, once, by a table that compiles as functions become hot
+/// ([ADR 0123]) — an atomic store of a pointer whose code was made executable
+/// before it — so reading one from two threads, or from a thread other than the
+/// one that built it, reads either nothing or that code, and the bounds say so
+/// where a run can check them.
+///
+/// [ADR 0123]: ../../../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
 /// [ADR 0080](../../../../docs/adr/0080-a-host-call-may-answer-pending.md) is
 /// why they are asked for: a [`crate::Vm`] that holds a table is `Send` only if
 /// what it points at may be reached from the thread it is moved to. Letting a
@@ -136,9 +141,25 @@ pub trait Tiered: Send + Sync {
     /// indirect call measured 2.4% of the native run.
     ///
     /// The answer must agree with [`entry`](Tiered::entry) for every id, and must
-    /// stay valid, unmoved and unchanged for as long as the table may be asked —
-    /// which for a table installed in a machine is until it is taken out again.
-    fn table(&self) -> Option<&[Option<Entry>]> {
+    /// stay valid and unmoved for as long as the table may be asked — which for
+    /// a table installed in a machine is until it is taken out again. A cell
+    /// may be filled in that time, never emptied or changed: compiled code reads
+    /// the slice directly.
+    fn table(&self) -> Option<&[EntryCell]> {
+        None
+    }
+
+    /// A call to `id` found no compiled entry: the table's chance to compile it.
+    ///
+    /// Asked where a call already asks for an entry — the encoded `CALL` arm
+    /// and the call helpers — and only when the answer was `None`, so a run
+    /// pays nothing for it at a dispatch and nothing at a call to compiled code
+    /// ([ADR 0123]). `None` by default, which is a table that never compiles
+    /// after it is installed; a table that compiles a function once it is hot
+    /// answers the entry it has just made, and the call that asked enters it.
+    ///
+    /// [ADR 0123]: ../../../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+    fn missed(&self, _id: FunctionId) -> Option<Entry> {
         None
     }
 
@@ -153,6 +174,45 @@ pub trait Tiered: Send + Sync {
     /// [ADR 0085]: ../../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
     fn resume(&self, _id: FunctionId) -> Option<&ResumePoints> {
         None
+    }
+}
+
+/// One function's entry in a tier table: its compiled code, or nothing yet.
+///
+/// An `Option<Entry>` that may be filled while it is shared — once, by a table
+/// that compiles a function when it becomes hot ([ADR 0123]). It has
+/// `Option<Entry>`'s layout, a pointer that is null for `None`, because
+/// compiled code reads a table of them directly through
+/// [`NativeCtx::entries`](cove_native::NativeCtx::entries).
+///
+/// [ADR 0123]: ../../../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+#[repr(transparent)]
+#[derive(Default)]
+pub struct EntryCell(AtomicUsize);
+
+const _: () = assert!(
+    std::mem::size_of::<EntryCell>() == std::mem::size_of::<Option<Entry>>()
+        && std::mem::align_of::<EntryCell>() == std::mem::align_of::<Option<Entry>>()
+);
+
+impl EntryCell {
+    /// The entry, if the function has one yet.
+    #[inline]
+    pub fn get(&self) -> Option<Entry> {
+        // Acquire, to see the code the entry points at as `set` published it.
+        // On x86-64 — the one host that has code to publish — it is a load.
+        let at = self.0.load(Ordering::Acquire);
+        match at {
+            0 => None,
+            // Safety: only `set` stores anything but nought, and what it
+            // stores is an `Entry`.
+            at => Some(unsafe { std::mem::transmute::<usize, Entry>(at) }),
+        }
+    }
+
+    /// Fills the cell with `entry`, whose code is already executable.
+    pub(crate) fn set(&self, entry: Entry) {
+        self.0.store(entry as usize, Ordering::Release);
     }
 }
 
@@ -298,7 +358,7 @@ pub(crate) struct Tiering {
     /// the slice and its length, or a null start when the table is not one.
     ///
     /// Raw for the reason `entries` is, and valid for exactly as long.
-    table: (*const Option<Entry>, usize),
+    table: (*const EntryCell, usize),
     /// Which transitions the calls of this run took.
     counts: Tiers,
     /// Dynamic calls to each function that did **not** go native, by
@@ -412,9 +472,20 @@ impl Tiering {
             return (*self.entries).entry(id);
         }
         match id.index() < len {
-            true => *start.add(id.index()),
+            true => (*start.add(id.index())).get(),
             false => None,
         }
+    }
+
+    /// [`Tiered::missed`] of the installed table: a call to `id` found no
+    /// entry, and the table may compile it now.
+    ///
+    /// # Safety
+    ///
+    /// The table installed is still alive, which is [`Tiering::new`]'s contract.
+    #[inline]
+    unsafe fn missed(&self, id: FunctionId) -> Option<Entry> {
+        (*self.entries).missed(id)
     }
 
     /// [`Tiered::resume`] of the installed table.
@@ -462,7 +533,7 @@ impl Tiering {
     ///
     /// The table this was aimed at is still alive.
     pub(crate) unsafe fn crossing(&mut self, callee: FunctionId) -> Option<Entry> {
-        let entry = self.entry(callee);
+        let entry = self.entry(callee).or_else(|| self.missed(callee));
         match entry {
             Some(_) => self.counts.vm_to_native += 1,
             None => {
@@ -564,7 +635,7 @@ impl<'m, 'a> Bridge<'m, 'a> {
         stayed: fn(&mut Tiers),
     ) -> Option<Entry> {
         let tier = self.tier;
-        let entry = (*tier).entry(callee);
+        let entry = (*tier).entry(callee).or_else(|| (*tier).missed(callee));
         match entry {
             Some(_) => crossed(&mut (*tier).counts),
             None => {
@@ -601,7 +672,7 @@ pub(crate) unsafe fn erase<'x>(entries: &'x dyn Tiered) -> *const (dyn Tiered + 
 /// # Safety
 ///
 /// `entries` is alive, which every installer guarantees.
-unsafe fn table_of(entries: *const (dyn Tiered + 'static)) -> (*const Option<Entry>, usize) {
+unsafe fn table_of(entries: *const (dyn Tiered + 'static)) -> (*const EntryCell, usize) {
     match (*entries).table() {
         Some(table) => (table.as_ptr(), table.len()),
         None => (std::ptr::null(), 0),
@@ -2253,6 +2324,10 @@ unsafe fn inline_admission(
     if table.is_null() || len < machine.program.functions.len() || tier.counts_helpers {
         return (std::ptr::null(), 0);
     }
+    // An `EntryCell` is an `Option<Entry>` that may be filled, with its layout,
+    // and compiled code reads one as the other: a null cell sends the call to
+    // `open`, which asks the table again and may compile the callee then.
+    let table = table.cast::<Option<Entry>>();
     let limit = match (*host).budget.limits().max_call_depth {
         Some(limit) => limit as u64,
         None => u64::MAX,
@@ -2606,7 +2681,7 @@ impl<'v, 'a> Session<'v, 'a> {
             }
             None => Box::new(unsafe { Tiering::new(table, functions, capacity) }),
         };
-        let entry = entries.entry(self.id);
+        let entry = entries.entry(self.id).or_else(|| entries.missed(self.id));
         match entry {
             Some(_) => tier.counts.host_to_native += 1,
             None => {

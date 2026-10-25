@@ -7,26 +7,36 @@
 //! — and until [issue #369](https://github.com/myuon/cove/issues/369) nothing
 //! was, because the only caller was a comparison harness that built its own.
 //!
-//! This is that thing: one [`NativeProgram`] per lowered program, compiled
-//! eagerly, finalized once, and then immutable for the life of the run.
+//! This is that thing: one [`NativeProgram`] per lowered program, which
+//! compiles under a [`TierUp`] policy — every function before the run, or each
+//! function at the call that makes it hot ([ADR 0123]) — and keeps every
+//! function's code immutable from the moment it is made executable.
 //!
-//! # Why eagerly, and why one finalize
+//! # When a function is compiled
 //!
-//! ADR 0056 measured the template compiler at **5.4 µs a function**, and drew the
-//! consequence itself: "which makes ADR 0055's 'compile every supported reachable
-//! function eagerly' cheap enough not to need a hotness counter — a thousand
-//! functions is five milliseconds". So there is no hotness counter here, no
-//! on-stack replacement and no deoptimization, which is ADR 0055's "Compile
-//! functions, not traces" taken literally.
+//! ADR 0056 measured the template compiler at **5.4 µs a function** and drew
+//! the consequence that compiling every reachable function eagerly needed no
+//! hotness counter. [Issue #713](https://github.com/myuon/cove/issues/713)
+//! measured what eager compilation cost on the default tier: once a duplicated
+//! `cove_ir::verify` and a duplicated loaded-address analysis were taken out,
+//! still 33–57 µs a function, most of it emitting and mapping code for
+//! functions that ran once or never — 46% of what `cove test` compiled was never
+//! called. So a run the default put on the tier compiles a function at its
+//! [`HOT_CALLS`]th call, and a function with a loop at its first, because there
+//! is no on-stack replacement: a call that is already running finishes on the
+//! tier it began on. [ADR 0123] has the measurements.
 //!
-//! One finalize matters more than it looks. A mapping is writable *or*
-//! executable and never both, and the template compiler's `Jit::finalize` is the
-//! flip — named without a link, because it exists only under a code generator's
-//! feature and an intra-doc link to an item a default build does not have is a
-//! broken link. Compiling on first call would mean flipping a page while Cove
-//! frames stand on it, so everything is compiled before the first entry and
-//! nothing is compiled after — which is also why a run cannot "rebuild or
-//! refinalize the JIT", a property issue #369 asks for in as many words.
+//! # One mapping per function, and when it is flipped
+//!
+//! A mapping is writable *or* executable and never both, and the template
+//! compiler's `Jit::finalize` is the flip — named without a link, because it
+//! exists only under a code generator's feature and an intra-doc link to an item
+//! a default build does not have is a broken link. Every function has a mapping
+//! of its own, so compiling one while others run writes only pages nothing has
+//! entered, and flips only those: no page is ever made writable again while a
+//! Cove frame stands on it, and a run never "rebuilds or refinalizes the JIT",
+//! the property issue #369 asks for in as many words. An eager table compiles
+//! everything and finalizes once, before the first entry.
 //!
 //! # What a refusal is, and what it is not
 //!
@@ -45,14 +55,63 @@
 //! figure covering both would hide which.
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+//! [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
 
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use cove_ir::{FunctionId, Program};
 use cove_native::{ResumePoints, Unavailable, WindowCode};
 
-use crate::vm::exec::native::Tiered;
+use crate::vm::exec::native::{EntryCell, Tiered};
 use crate::NativeEntry;
+
+/// When a function is compiled: before the run, or once it has been called
+/// often enough to be worth it ([ADR 0123]).
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierUp {
+    /// Every supported function, before the first instruction runs.
+    ///
+    /// What `--backend native` named asks for, and what a test of the tier
+    /// wants: every function the code generator takes runs as machine code from
+    /// its first call, so a fixture called once still tests the code generator.
+    Eager,
+    /// A function is compiled at the call that makes this many calls to it that
+    /// found no machine code, and that call and every later one enter the
+    /// compiled code — except a function whose body has a loop, which is
+    /// compiled at its first call, because one call of it may run for as long
+    /// as the loop does and there is no on-stack replacement to rescue it.
+    ///
+    /// Counted per function over the life of the [`NativeProgram`], so the runs
+    /// that share one — the cases of a property, the files of one `cove fmt` —
+    /// share the count. The count is taken where a call already asks the table
+    /// for an entry, never at a dispatch. A function running when it becomes
+    /// hot finishes on the tier it started on: there is no on-stack replacement.
+    AtCall(NonZeroU32),
+}
+
+/// The call count [`TierUp::HOT`] compiles a function at.
+///
+/// Chosen by measurement — see [ADR 0123] for the table it was chosen from.
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+pub const HOT_CALLS: u32 = 16;
+
+impl TierUp {
+    /// The policy a run that named no backend compiles under.
+    pub const HOT: TierUp = match NonZeroU32::new(HOT_CALLS) {
+        Some(calls) => TierUp::AtCall(calls),
+        None => panic!("a hot function has been called at least once"),
+    };
+}
+
+/// A function's call count once it has been decided: compiled, refused, or a
+/// stub. Nothing counts past it.
+const SETTLED: u32 = u32::MAX;
 
 /// Every compiled function of one lowered program, and the pages they live in.
 ///
@@ -61,29 +120,66 @@ use crate::NativeEntry;
 /// question the runtime asks of it, and it must **outlive every run that was
 /// given it**: dropping it would drop the mappings its entries point into.
 ///
-/// Build it with [`compile()`] and hand it to
+/// Build it with [`compile()`], or [`compile_tiered`] for a table that compiles
+/// as functions become hot, and hand it to
 /// [`Vm::with_native`](crate::Vm::with_native).
+///
+/// # What changes after it is built
+///
+/// Under [`TierUp::AtCall`], an entry that was `None` becomes `Some` once, when
+/// its function becomes hot, and never changes again; its machine code is in a
+/// mapping of its own that is never written after it is made executable. So
+/// ADR 0055's "code is immutable for the lifetime of its Program" holds of every
+/// function's code. What grows is the set of functions that have code, and the
+/// figures that count them.
 pub struct NativeProgram {
-    /// The code generator, kept because it owns the pages.
-    ///
-    /// Never used again after [`compile()`] returns — every entry
-    /// was taken out of it before then — and that is the point: this field is
-    /// the lifetime of the executable memory, written down.
-    #[cfg(feature = "template")]
-    #[allow(dead_code)]
-    jit: cove_native::template::Jit,
-    /// One entry per `FunctionId`, `None` for a function that runs encoded.
-    entries: Vec<Option<NativeEntry>>,
+    /// One entry per `FunctionId`, empty for a function that runs encoded.
+    entries: Box<[EntryCell]>,
     /// Where each compiled function may be re-entered part-way through, by
     /// `FunctionId` — what lets a run yield inside compiled code and resume on
-    /// another thread ([ADR 0085]). `None` exactly where `entries` is.
+    /// another thread ([ADR 0085]). Set before its entry is.
     ///
     /// [ADR 0085]: ../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
-    resumes: Vec<Option<ResumePoints>>,
-    /// One row per refused function, in `FunctionId` order.
-    refusals: Vec<Refused>,
+    resumes: Box<[OnceLock<ResumePoints>]>,
+    /// Calls to each function that found no machine code, until it is
+    /// [`SETTLED`]. Unused under [`TierUp::Eager`].
+    ///
+    /// A load and a store rather than an atomic add: two runs on two threads
+    /// may lose an increment between them, which delays a compilation by a
+    /// call and changes no answer, and a locked add on every such call would
+    /// be paid by every run on one thread.
+    calls: Box<[AtomicU32]>,
+    policy: TierUp,
+    /// The program, kept to compile from as functions become hot. `None` for a
+    /// table compiled eagerly, which never compiles again.
+    program: Option<Arc<Program>>,
+    /// By function, `cove_ir::verify::places::loaded_uses`, where the
+    /// preparation this table was compiled over had already taken it. See
+    /// `cove_native::supported_given`.
+    loaded: Option<Loaded>,
     reachable: usize,
     stubs: usize,
+    /// Whether the code was compiled against the counting helpers. See
+    /// [`compile_counting`].
+    counts_helpers: bool,
+    /// Everything compiling writes: the code generator and the figures.
+    state: Mutex<State>,
+}
+
+/// By function, the pcs of the loads and stores through an address that may
+/// have been loaded out of memory: what the encoded machine's preparation
+/// already holds, shared with the native tier's subset.
+pub(crate) type Loaded = Arc<[Box<[usize]>]>;
+
+/// What compiling a [`NativeProgram`] writes, behind its lock.
+struct State {
+    /// The code generator, kept because it owns the pages — and, under
+    /// [`TierUp::AtCall`], because it compiles the next hot function.
+    #[cfg(feature = "template")]
+    jit: cove_native::template::Jit,
+    /// One row per refused function, in the order they were refused: by
+    /// `FunctionId` for an eager table, by when each became hot otherwise.
+    refusals: Vec<Refused>,
     compiled: usize,
     code_bytes: u64,
     /// How much of `code_bytes` is [ADR 0062] buffer windows, by pattern, and
@@ -97,9 +193,6 @@ pub struct NativeProgram {
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: WindowCode,
     compile: Duration,
-    /// Whether the code was compiled against the counting helpers. See
-    /// [`compile_counting`].
-    counts_helpers: bool,
 }
 
 /// One function that has no machine code, and why.
@@ -198,19 +291,40 @@ pub enum Blocked {
 
 impl Tiered for NativeProgram {
     fn entry(&self, id: FunctionId) -> Option<NativeEntry> {
-        self.entries.get(id.index()).copied().flatten()
+        self.entries.get(id.index())?.get()
     }
 
     fn counts_helpers(&self) -> bool {
         self.counts_helpers
     }
 
-    fn table(&self) -> Option<&[Option<NativeEntry>]> {
+    fn table(&self) -> Option<&[EntryCell]> {
         Some(&self.entries)
     }
 
     fn resume(&self, id: FunctionId) -> Option<&ResumePoints> {
-        self.resumes.get(id.index())?.as_ref()
+        self.resumes.get(id.index())?.get()
+    }
+
+    #[inline]
+    fn missed(&self, id: FunctionId) -> Option<NativeEntry> {
+        let TierUp::AtCall(hot) = self.policy else {
+            return None;
+        };
+        let calls = self.calls.get(id.index())?;
+        let seen = calls.load(Ordering::Relaxed);
+        if seen == SETTLED {
+            return None;
+        }
+        let seen = seen + 1;
+        // A function with a loop is compiled at its first call: one call of it
+        // may run for as long as the loop does, and with no on-stack
+        // replacement a later call is too late for that one (ADR 0123).
+        if seen >= hot.get() || (seen == 1 && self.loops(id)) {
+            return self.tier_up(id);
+        }
+        calls.store(seen, Ordering::Relaxed);
+        None
     }
 }
 
@@ -242,27 +356,48 @@ impl NativeProgram {
         self.stubs
     }
 
+    /// When this table compiles a function.
+    pub fn policy(&self) -> TierUp {
+        self.policy
+    }
+
     /// Functions that have machine code.
     pub fn compiled(&self) -> usize {
-        self.compiled
+        self.state().compiled
     }
 
-    /// Functions that run on the encoded tier.
+    /// Functions that run on the encoded tier because the code generator
+    /// refused them.
     pub fn refused(&self) -> usize {
-        self.refusals.len()
+        self.state().refusals.len()
     }
 
-    /// Every refused function, in `FunctionId` order.
+    /// Reachable functions that have not been asked about yet: under
+    /// [`TierUp::AtCall`], those that have not been called often enough to be
+    /// compiled. Nought for an eager table.
+    ///
+    /// **Not a refusal.** Such a function may be one the code generator would
+    /// take; it runs on the encoded tier because compiling it was not expected
+    /// to pay, and a report that counted it as refused would blame the code
+    /// generator for a policy.
+    pub fn not_hot(&self) -> usize {
+        let state = self.state();
+        self.reachable - state.compiled - state.refusals.len()
+    }
+
+    /// Every refused function: in `FunctionId` order for an eager table, in the
+    /// order they became hot otherwise.
     ///
     /// Unranked on purpose: ranking needs a run's dynamic call counts, which this
-    /// type does not have and must not pretend to.
-    pub fn refusals(&self) -> &[Refused] {
-        &self.refusals
+    /// type does not have and must not pretend to. A copy, because a table that
+    /// compiles as functions become hot may refuse another while it is read.
+    pub fn refusals(&self) -> Vec<Refused> {
+        self.state().refusals.clone()
     }
 
     /// Bytes of machine code emitted, over every compiled function.
     pub fn code_bytes(&self) -> u64 {
-        self.code_bytes
+        self.state().code_bytes
     }
 
     /// Which part of [`code_bytes`](Self::code_bytes) is ADR 0062's buffer
@@ -272,21 +407,77 @@ impl NativeProgram {
     /// which is a fact about the generator rather than about the program —
     /// [`WindowCode`] says which and why. The sites are counted either way.
     pub fn window_code(&self) -> WindowCode {
-        self.windows
+        self.state().windows
     }
 
     /// What compiling cost, which is never part of what executing cost.
+    ///
+    /// Under [`TierUp::AtCall`] the compiling happens *during* the runs, at the
+    /// calls that made a function hot, and this is its sum so far: a caller
+    /// that timed a run and wants its execution alone subtracts it.
     pub fn compile_time(&self) -> Duration {
-        self.compile
+        self.state().compile
+    }
+
+    /// The lock on what compiling writes. A poisoned lock is taken anyway:
+    /// nothing a panic could have left half-written there is read unchecked.
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether `id`'s body has a loop: an instruction that may transfer control
+    /// to itself or to one before it.
+    ///
+    /// Asked once per function, at its first call that found no machine code,
+    /// so it is one pass over a body that is about to run anyway.
+    fn loops(&self, id: FunctionId) -> bool {
+        let Some(program) = self.program.as_deref() else {
+            return false;
+        };
+        let mut back = false;
+        for (pc, inst) in program.function(id).code.iter().enumerate() {
+            inst.targets(program, &mut |to| back |= to as usize <= pc);
+            if back {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Compiles `id`, which has just become hot, and answers its entry — or
+    /// `None` if the code generator refused it, which is then recorded.
+    ///
+    /// Out of line and cold, because a function reaches it once.
+    #[cold]
+    #[inline(never)]
+    fn tier_up(&self, id: FunctionId) -> Option<NativeEntry> {
+        let program = self.program.as_deref()?;
+        let mut state = self.state();
+        // Another run may have compiled it while this one waited for the lock.
+        if let Some(entry) = self.entry(id) {
+            return Some(entry);
+        }
+        let calls = &self.calls[id.index()];
+        if calls.load(Ordering::Relaxed) == SETTLED {
+            return None;
+        }
+        calls.store(SETTLED, Ordering::Relaxed);
+        let (entry, resumes) = compile_one(&mut state, program, id, loaded_of(&self.loaded, id))?;
+        // The resume points first: a run that finds the entry may yield inside
+        // the code at once, and its resume asks for them.
+        let _ = self.resumes[id.index()].set(resumes);
+        self.entries[id.index()].set(entry);
+        Some(entry)
     }
 }
 
 /// Compiles every supported function of `program`, or says why this host cannot.
 ///
-/// The whole table, eagerly, then one `finalize`. See the module documentation
-/// for why both of those are the shape rather than a choice, and
-/// [`Unavailable`] for what a refusal of the *host* is: a capability diagnostic,
-/// never an attempted fallback.
+/// The whole table, eagerly, then one `finalize`: [`TierUp::Eager`]. See
+/// [`Unavailable`] for what a refusal of the *host* is: a capability
+/// diagnostic, never an attempted fallback.
 ///
 /// Three ways it can answer `Err`, and all three are the host's rather than the
 /// program's: this build has no code generator, this architecture is not x86-64,
@@ -294,7 +485,61 @@ impl NativeProgram {
 /// never makes this fail — a function the generator refuses is recorded and runs
 /// encoded.
 pub fn compile(program: &Program) -> Result<NativeProgram, Unavailable> {
-    compile_with(program, false)
+    compile_with(Source::Borrowed(program), false, TierUp::Eager, None, None)
+}
+
+/// [`compile()`] under `policy`: under [`TierUp::AtCall`], nothing is compiled
+/// here and each function is compiled at the call that makes it hot.
+///
+/// Takes the program by `Arc` because a table that compiles later keeps it.
+/// `counting` is [`compile_counting`]'s question.
+pub fn compile_tiered(
+    program: Arc<Program>,
+    policy: TierUp,
+    counting: bool,
+) -> Result<NativeProgram, Unavailable> {
+    compile_with(Source::Shared(program), counting, policy, None, None)
+}
+
+/// [`compile_tiered`] over a program the encoded machine has already prepared:
+/// verified — or found not to verify — and its loaded addresses taken, so that
+/// neither is asked twice (issue #713).
+pub(crate) fn compile_prepared(
+    program: &Arc<Program>,
+    policy: TierUp,
+    counting: bool,
+    verified: bool,
+    loaded: Loaded,
+) -> Result<NativeProgram, Unavailable> {
+    compile_with(
+        Source::Shared(Arc::clone(program)),
+        counting,
+        policy,
+        Some(verified),
+        Some(loaded),
+    )
+}
+
+/// The program a table is compiled from: borrowed for an eager table, which
+/// never reads it again, and shared for one that compiles as functions become
+/// hot.
+///
+/// Read only by the code generator's half, so a build without one reads none
+/// of it.
+#[cfg_attr(not(feature = "template"), allow(dead_code))]
+enum Source<'p> {
+    Borrowed(&'p Program),
+    Shared(Arc<Program>),
+}
+
+#[cfg_attr(not(feature = "template"), allow(dead_code))]
+impl Source<'_> {
+    fn program(&self) -> &Program {
+        match self {
+            Source::Borrowed(program) => program,
+            Source::Shared(program) => program,
+        }
+    }
 }
 
 /// Whether this build and this host have a native tier at all, answered
@@ -323,7 +568,7 @@ pub fn available() -> Result<(), Unavailable> {
 /// ask for the counts should not use this: it is a table that pays for a question
 /// nobody asked.
 pub fn compile_counting(program: &Program) -> Result<NativeProgram, Unavailable> {
-    compile_with(program, true)
+    compile_with(Source::Borrowed(program), true, TierUp::Eager, None, None)
 }
 
 // The template arm answers a byte `Inst::RunFind` in emitted code when the
@@ -333,10 +578,20 @@ pub fn compile_counting(program: &Program) -> Result<NativeProgram, Unavailable>
 #[cfg(feature = "template")]
 const _: () = assert!(cove_native::template::SHORT_FIND_TURNS as u64 == crate::SAFEPOINT_STRIDE);
 
+/// The table for `source` under `policy`, with `verified` the answer
+/// `cove_ir::verify` already gave and `loaded` the loaded addresses already
+/// taken, or `None` to ask them here.
 #[cfg(feature = "template")]
-fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unavailable> {
+fn compile_with(
+    source: Source<'_>,
+    counting: bool,
+    policy: TierUp,
+    verified: Option<bool>,
+    loaded: Option<Loaded>,
+) -> Result<NativeProgram, Unavailable> {
     use crate::wallclock::Instant;
 
+    let program = source.program();
     let helpers = match counting {
         false => crate::native_helpers(),
         true => crate::native_helpers_counting(),
@@ -348,78 +603,161 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     // — except in a table that counts its helper calls, whose whole point is to
     // see every call reach `open`.
     let jit = cove_native::template::Jit::new(helpers)?;
-    let mut jit = match counting {
+    let jit = match counting {
         false => jit.opening_frames_inline(),
         true => jit.calling_directly(),
     };
-    let mut entries = vec![None; program.functions.len()];
-    let mut refusals = Vec::new();
-    let mut done = Vec::new();
-    let mut code_bytes = 0u64;
-    let mut windows = WindowCode::default();
-    // One clock over the whole loop rather than one per function: what issue #369
-    // asks to keep apart from execution is the *total*, and a per-function sample
-    // is the comparison harness's question rather than this one's.
+    let functions = program.functions.len();
+    let mut state = State {
+        jit,
+        refusals: Vec::new(),
+        compiled: 0,
+        code_bytes: 0,
+        windows: WindowCode::default(),
+        compile: Duration::ZERO,
+    };
+    let entries: Box<[EntryCell]> = (0..functions).map(|_| EntryCell::default()).collect();
+    let resumes: Box<[OnceLock<ResumePoints>]> = (0..functions).map(|_| OnceLock::new()).collect();
+    let calls: Box<[AtomicU32]> = (0..functions).map(|_| AtomicU32::new(0)).collect();
+    let stubs = program
+        .functions
+        .iter()
+        .filter(|function| function.is_stub())
+        .count();
+    // One clock over the whole of the eager loop rather than one per function:
+    // what issue #369 asks to keep apart from execution is the *total*.
     let started = Instant::now();
-    let mut stubs = 0;
     // The code generator reads the program as freely as the encoder does, so
     // it is handed only a program `cove_ir::verify` accepts (ADR 0120). One
     // that does not verify compiles nothing: every function is refused, and
     // the encoded machine it would fall back to refuses the program itself
-    // before its first instruction.
-    let verified = cove_ir::verify(program).is_ok();
-    for at in 0..program.functions.len() {
-        let id = FunctionId(at as u32);
-        if !verified {
-            refusals.push(Refused {
-                id,
-                name: program.function(id).qualified(),
-                reason: "the program does not verify".to_string(),
-                at: None,
-                instruction: None,
-                blocked: None,
-                blockers: Vec::new(),
-            });
-            continue;
-        }
-        // A stub is a declaration with no body in this slice, so it is neither
-        // compiled nor refused. See `NativeProgram::reachable` for why counting it
-        // either way would misreport the run.
-        if program.function(id).is_stub() {
-            stubs += 1;
-            continue;
-        }
-        match jit.compile(program, id) {
-            Some(compiled) => {
-                code_bytes += u64::from(compiled.code_bytes);
-                windows.add(&compiled.windows);
-                done.push((id, compiled));
+    // before its first instruction. A preparation that has already asked says
+    // so, and is not asked again (issue #713).
+    let verified = verified.unwrap_or_else(|| cove_ir::verify(program).is_ok());
+    let eager = !verified || policy == TierUp::Eager;
+    if eager {
+        let mut done = Vec::new();
+        for at in 0..functions {
+            let id = FunctionId(at as u32);
+            calls[at].store(SETTLED, Ordering::Relaxed);
+            if !verified {
+                state.refusals.push(Refused {
+                    id,
+                    name: program.function(id).qualified(),
+                    reason: "the program does not verify".to_string(),
+                    at: None,
+                    instruction: None,
+                    blocked: None,
+                    blockers: Vec::new(),
+                });
+                continue;
             }
-            None => refusals.push(refused_row(program, id)),
+            // A stub is a declaration with no body in this slice, so it is
+            // neither compiled nor refused. See `NativeProgram::reachable` for
+            // why counting it either way would misreport the run.
+            if program.function(id).is_stub() {
+                continue;
+            }
+            match state.jit.compile_given(program, id, loaded_of(&loaded, id)) {
+                Some(compiled) => {
+                    state.code_bytes += u64::from(compiled.code_bytes);
+                    state.windows.add(&compiled.windows);
+                    done.push((id, compiled));
+                }
+                None => state.refusals.push(refused_row(program, id)),
+            }
+        }
+        // Before any entry, and once. Nothing is compiled after this line, so
+        // no page is ever made writable again while a Cove frame stands on it.
+        state.jit.finalize()?;
+        state.compiled = done.len();
+        for (id, compiled) in done {
+            let _ = resumes[id.index()].set(state.jit.resume_points(compiled));
+            entries[id.index()].set(state.jit.entry(compiled));
+        }
+    } else {
+        // Nothing compiled yet, and a stub never is.
+        for (at, function) in program.functions.iter().enumerate() {
+            if function.is_stub() {
+                calls[at].store(SETTLED, Ordering::Relaxed);
+            }
         }
     }
-    // Before any entry, and once. Nothing is compiled after this line, so no page
-    // is ever made writable again while a Cove frame stands on it.
-    jit.finalize()?;
-    let compile = started.elapsed();
-    let mut resumes = vec![None; program.functions.len()];
-    for (id, compiled) in done {
-        resumes[id.index()] = Some(jit.resume_points(compiled));
-        entries[id.index()] = Some(jit.entry(compiled));
-    }
+    state.compile = started.elapsed();
     Ok(NativeProgram {
-        jit,
-        compiled: entries.iter().filter(|entry| entry.is_some()).count(),
         entries,
         resumes,
-        refusals,
-        reachable: program.functions.len() - stubs,
+        calls,
+        policy,
+        program: match (eager, source) {
+            (false, Source::Shared(program)) => Some(program),
+            // A borrowed program cannot be kept, so a table over one is
+            // compiled eagerly whatever it was asked: `compile` and
+            // `compile_counting` are the two that borrow, and both ask for it.
+            _ => None,
+        },
+        loaded,
+        reachable: functions - stubs,
         stubs,
-        code_bytes,
-        windows,
-        compile,
         counts_helpers: counting,
+        state: Mutex::new(state),
     })
+}
+
+/// `id`'s loaded addresses, where they were handed over.
+fn loaded_of(loaded: &Option<Loaded>, id: FunctionId) -> Option<&[usize]> {
+    loaded.as_deref()?.get(id.index()).map(|pcs| &pcs[..])
+}
+
+/// Compiles one function that has become hot, into its own mapping, and makes
+/// that mapping executable — or records why it was refused.
+///
+/// A page that is flipped here holds only this function, which nothing can
+/// have entered yet, so no page under a running Cove frame is ever writable:
+/// the invariant the eager table keeps by finalizing once, kept per mapping.
+#[cfg(feature = "template")]
+fn compile_one(
+    state: &mut State,
+    program: &Program,
+    id: FunctionId,
+    loaded: Option<&[usize]>,
+) -> Option<(NativeEntry, ResumePoints)> {
+    use crate::wallclock::Instant;
+
+    if program.function(id).is_stub() {
+        return None;
+    }
+    let started = Instant::now();
+    let answer = match state.jit.compile_given(program, id, loaded) {
+        Some(compiled) => match state.jit.finalize() {
+            Ok(()) => {
+                state.compiled += 1;
+                state.code_bytes += u64::from(compiled.code_bytes);
+                state.windows.add(&compiled.windows);
+                Some((state.jit.entry(compiled), state.jit.resume_points(compiled)))
+            }
+            // The host would not make the page executable. The function runs
+            // encoded, and says why.
+            Err(unavailable) => {
+                state.refusals.push(Refused {
+                    id,
+                    name: program.function(id).qualified(),
+                    reason: unavailable.to_string(),
+                    at: None,
+                    instruction: None,
+                    blocked: None,
+                    blockers: Vec::new(),
+                });
+                None
+            }
+        },
+        None => {
+            state.refusals.push(refused_row(program, id));
+            None
+        }
+    };
+    state.compile += started.elapsed();
+    answer
 }
 
 /// One refused function's row: the reason, the pc, the opcode, and every
@@ -571,6 +909,17 @@ fn opcode_at(function: &cove_ir::Function, pc: u32) -> Option<String> {
     Op::from_number(held.opcode()).map(|op| format!("{op:?}"))
 }
 
+/// Never reached without a code generator: no table is ever built.
+#[cfg(not(feature = "template"))]
+fn compile_one(
+    _state: &mut State,
+    _program: &Program,
+    _id: FunctionId,
+    _loaded: Option<&[usize]>,
+) -> Option<(NativeEntry, ResumePoints)> {
+    None
+}
+
 /// Native execution is not in this build.
 ///
 /// ADR 0055's adoption gate asks that "a build without the native feature has no
@@ -580,7 +929,13 @@ fn opcode_at(function: &cove_ir::Function, pc: u32) -> Option<String> {
 /// **capability diagnostic** and not a silent fallback — the same answer the
 /// x86-64-only generator gives on another architecture, and for the same reason.
 #[cfg(not(feature = "template"))]
-fn compile_with(_program: &Program, _counting: bool) -> Result<NativeProgram, Unavailable> {
+fn compile_with(
+    _source: Source<'_>,
+    _counting: bool,
+    _policy: TierUp,
+    _verified: Option<bool>,
+    _loaded: Option<Loaded>,
+) -> Result<NativeProgram, Unavailable> {
     Err(Unavailable::new(
         "this build has no native code generator: it was built without the `template` \
          feature, which the `cove` binary turns on by default",
