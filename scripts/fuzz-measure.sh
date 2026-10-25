@@ -130,11 +130,12 @@ for seed in $(seq 1 "$runs"); do
       || find "$run/artifacts" -type f -exec stat -c '%Y' {} \;) \
       | sort -n | head -1 | awk -v s="$start" '{print $1 - s}')
   fi
-  execs=$(grep -Eo 'stat::number_of_executed_units: *[0-9]+' "$run/fuzz.log" | awk '{s += $2} END {print s + 0}')
+  # The last progress line's count: `#N:` in a `-fork` session, `#N` without.
+  execs=$( (grep -Eo '^#[0-9]+' "$run/fuzz.log" || true) | tail -1 | tr -d '#')
   {
     echo "status: $status"
     echo "wall seconds: $((end - start))"
-    echo "executions (libFuzzer's final stats, summed over processes): $execs"
+    echo "executions (libFuzzer's last progress line): ${execs:-0}"
     echo "findings: $findings"
     if [ -n "$first" ]; then echo "first finding written after: ${first}s"; fi
   } > "$run/result.txt"

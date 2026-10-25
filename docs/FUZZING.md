@@ -480,7 +480,7 @@ directly pays nothing, and the dispatch loop is untouched.
 
 **In a session.** Set `COVE_FUZZ_STATS_DIR`, and every process the target runs
 in writes `$COVE_FUZZ_STATS_DIR/<target>-<pid>.json` after its first input,
-every 256 inputs, at least every ten seconds, and before an input that is
+every 256 inputs, at least every second, and before an input that is
 about to panic — by a temporary file and a rename, so a reader never sees half
 a file. It is written as it goes because libFuzzer does not promise to run
 anything at exit and kills a `-fork` child. Unset, nothing is counted and no

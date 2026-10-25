@@ -1128,7 +1128,14 @@ pub const FLUSH_EVERY: u64 = 256;
 
 /// The longest a session goes without writing its file, once an input has
 /// been counted since the last write.
-pub const FLUSH_AFTER: Duration = Duration::from_secs(10);
+///
+/// One second, not ten: a `-fork` session's children run jobs of a few
+/// seconds each early on and are killed at the end of one, and at ten seconds
+/// most of them were killed before they wrote anything — a 20-second
+/// `differential` session with `-fork=2` counted 12 of libFuzzer's 240
+/// executions. A write is a few kilobytes and a rename, against tens of
+/// milliseconds an input.
+pub const FLUSH_AFTER: Duration = Duration::from_secs(1);
 
 /// The environment variable naming the directory a session writes to.
 pub const STATS_DIR: &str = "COVE_FUZZ_STATS_DIR";
