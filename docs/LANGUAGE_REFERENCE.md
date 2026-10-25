@@ -1023,7 +1023,10 @@ is written, with its type parameters standing for whatever they hold, so
 `Cell<T> { it: T }` is admitted and a `Cell<Node>` inside a `Node` is not.
 
 A `var` parameter is a non-escaping inout alias, marked at the declaration and
-at the call site. A mutating receiver is `var self`.
+at the call site. A mutating receiver is `var self`. A receiver, `self` or
+`var self`, is declared only by a function inside `impl` (or a trait's
+method); on a module-level or local `fn`, or a lambda, it is refused
+(`cove::parse::self_outside_method`).
 
 ## Tasks
 

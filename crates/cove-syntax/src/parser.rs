@@ -836,7 +836,10 @@ impl Parser<'_> {
             }
 
             match self.parse_item(doc.map(|(text, _)| text)) {
-                Ok(item) => items.push(item),
+                Ok(item) => {
+                    self.reject_free_receiver(&item);
+                    items.push(item);
+                }
                 Err(Bail) => self.recover_to_item(false),
             }
         }
@@ -1001,6 +1004,32 @@ impl Parser<'_> {
             return false;
         }
         true
+    }
+
+    /// Reports a `self` receiver on a function declared outside `impl`.
+    ///
+    /// A receiver is what makes a declaration a method of the type its
+    /// `impl` names; a module-level or local `fn` has no such type, so a
+    /// `self` there declares nothing a call could supply. It used to be
+    /// accepted and then read two ways — the lowering dropped the receiver
+    /// and the interpreter refused every call (issue 720) — which is the
+    /// same mistake `parse_lambda` already refuses for a function value.
+    fn reject_free_receiver(&mut self, item: &Item) {
+        let ItemKind::Fn(decl) = &item.kind else {
+            return;
+        };
+        let Some(receiver) = decl.receiver else {
+            return;
+        };
+        self.error(
+            Diagnostic::error(
+                "cove::parse::self_outside_method",
+                "`self` is only a parameter of a method",
+            )
+            .at(receiver.span)
+            .rule("A `self` receiver belongs to a function declared inside `impl`.")
+            .help("Remove `self`, or move this function into an `impl` block."),
+        );
     }
 
     /// Reports a `test fn` written anywhere but at the top level of a file.
@@ -1598,6 +1627,7 @@ impl Parser<'_> {
         if self.at_item_start() {
             let item = self.parse_item(doc.map(|(text, _)| text))?;
             self.reject_nested_test(&item, "inside a block");
+            self.reject_free_receiver(&item);
             let span = item.span;
             return Ok(Stmt {
                 kind: StmtKind::Item(Box::new(item)),
@@ -2696,6 +2726,30 @@ mod tests {
 }",
         );
         assert_eq!(codes(&diagnostics), ["cove::parse::nested_test"]);
+    }
+
+    #[test]
+    fn rejects_a_receiver_on_a_function_outside_impl() {
+        // Issue 720: accepted, then the lowering dropped `self` and the
+        // interpreter refused the call.
+        for source in [
+            "fn f(self) -> Int { 1 }",
+            "fn f(var self, x: Int) -> Int { x }",
+            "fn main() {
+  fn g(self) -> Int { 1 }
+}",
+        ] {
+            let diagnostics = errors(source);
+            assert_eq!(
+                codes(&diagnostics),
+                ["cove::parse::self_outside_method"],
+                "{source}"
+            );
+        }
+        // Inside `impl`, the same declaration is a method.
+        ok("impl Point {
+  fn f(self) -> Int { 1 }
+}");
     }
 
     #[test]
