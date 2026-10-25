@@ -1,6 +1,8 @@
 # ADR 0117: `verify` refuses a program whose ids are out of range
 
 - Status: Accepted
+- Superseded in part by [ADR 0120](0120-the-vm-runs-only-what-verifies.md),
+  which decides that a decoded image which verifies is run
 - Date: 2026-10-24
 - Decides: that `cove_ir::verify` answers for every `Program`, including one
   `serial::decode` returned, by checking every id against its table before it
