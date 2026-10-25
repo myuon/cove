@@ -1,0 +1,39 @@
+use std.url
+
+/// Percent-encoding any text and decoding it again gives the text back.
+test fn percentRoundTrips(text: String) -> Result<Unit, Error> {
+  assertEqual(url.percentDecode(url.percentEncode(text))?, text)?
+  Ok(())
+}
+
+/// Sorting an array keeps its length and leaves it in order.
+test fn sortingKeepsLengthAndOrders(items: Array<Int>) -> Result<Unit, Error> {
+  let sorted = items.sorted(fn(a, b) {
+    a < b
+  })
+  assertEqual(sorted.length(), items.length())?
+  var at = 1
+  while at < sorted.length() {
+    assert(sorted.get(at - 1).unwrapOr(0) <= sorted.get(at).unwrapOr(0))?
+    at = at + 1
+  }
+  Ok(())
+}
+
+/// A deliberately false law: a `%` in the text is itself encoded, as `%25`,
+/// so the runner finds a counterexample and shrinks it to the one character
+/// that matters, and `limit`, which the failure does not depend on, to 0.
+test fn encodingNeverWritesPercentTwentyFive(
+  text: String,
+  limit: Int,
+) -> Result<Unit, Error> {
+  assert(!url.percentEncode(text).contains("%25") || limit > 1000)?
+  Ok(())
+}
+
+/// Another false law, over an array: one of three elements or more is shrunk
+/// to exactly three, each of them 0.
+test fn arraysAreShort(items: Array<Int>) -> Result<Unit, Error> {
+  assert(items.length() < 3)?
+  Ok(())
+}

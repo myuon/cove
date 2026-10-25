@@ -47,6 +47,14 @@ pub struct TestConfig {
     /// run anywhere, so naming a capability here is how a package says it
     /// means the real thing for that one.
     pub allow_real: Vec<String>,
+    /// How many generated cases `cove test` runs each property for — a
+    /// `test fn` with parameters (ADR 0121) — or `None` for the runner's
+    /// default of 100.
+    ///
+    /// One number per package rather than per property, for the reason the
+    /// table is one setting per package: a test declares nothing of its own
+    /// for a per-test table to hang off.
+    pub cases: Option<u32>,
 }
 
 /// Parses the text of a `cove.toml`.
@@ -90,6 +98,7 @@ fn parse_test(value: &toml::Value) -> Result<TestConfig, String> {
         .ok_or_else(|| "cove.toml: `test` must be a table".to_string())?;
 
     let mut allow_real = Vec::new();
+    let mut cases = None;
     for (key, value) in table {
         match key.as_str() {
             "allow_real" => {
@@ -103,10 +112,20 @@ fn parse_test(value: &toml::Value) -> Result<TestConfig, String> {
                     allow_real.push(item.to_string());
                 }
             }
+            "cases" => {
+                let count = value
+                    .as_integer()
+                    .and_then(|count| u32::try_from(count).ok())
+                    .filter(|count| *count > 0)
+                    .ok_or_else(|| {
+                        "cove.toml: `test.cases` must be a positive integer".to_string()
+                    })?;
+                cases = Some(count);
+            }
             other => return Err(format!("cove.toml: unknown key `test.{other}`")),
         }
     }
-    Ok(TestConfig { allow_real })
+    Ok(TestConfig { allow_real, cases })
 }
 
 fn parse_check(value: &toml::Value) -> Result<CheckConfig, String> {
@@ -584,6 +603,22 @@ mod tests {
             config.test.allow_real,
             vec!["clock".to_string(), "files".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_the_case_count_and_defaults_it_to_none() {
+        assert_eq!(
+            parse("[test]\ncases = 500\n").unwrap().test.cases,
+            Some(500)
+        );
+        assert_eq!(parse("[test]\n").unwrap().test.cases, None);
+        for bad in ["0", "-1", "\"many\"", "1.5", "4294967296"] {
+            assert_eq!(
+                parse(&format!("[test]\ncases = {bad}\n")).unwrap_err(),
+                "cove.toml: `test.cases` must be a positive integer",
+                "{bad}"
+            );
+        }
     }
 
     #[test]

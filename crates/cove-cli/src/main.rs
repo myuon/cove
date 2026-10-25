@@ -35,6 +35,7 @@ mod fixture;
 mod generate;
 mod impact;
 mod json;
+mod property;
 mod reference;
 mod replay;
 mod test;
@@ -50,7 +51,8 @@ usage:
   cove build <name> [--out <path>]     package that run as a native executable
   cove generate <name>                 run <name>'s entry and write its source to `generates`
   cove generate --check                fail if any `generates` file is stale
-  cove test [path] [--filter <sub>]    run every `test fn` the package declares
+  cove test [path] [--filter <sub>] [--seed <n>]
+                                       run every `test fn` the package declares
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
   cove api diff [path]                 compare the source against a recorded interface
@@ -116,6 +118,14 @@ suite. Each test is granted exactly the
 capabilities its call graph requires, with each host's fake implementation,
 so a suite is deterministic; `cove.toml`'s `[test] allow_real = [...]` names
 the capabilities to grant for real instead.
+
+A `test fn` with parameters is a property (ADR 0121): `cove test` generates
+its arguments from the parameters' types — `Int`, `String`, `Bool`, and
+`Array`s of those — and runs it on 100 cases, or on `[test] cases = N`. A
+failing case is shrunk, and reported with the smaller arguments as Cove
+literals and the seed it ran under. The seed is a hash of the test's name, so
+a run is the same run every time; `--seed <n>` runs every property under `n`
+instead, which with `--filter` reproduces a reported failure.
 
 `cove reference` writes `docs/BUILTINS.md` and `docs/builtins.json` out of
 `cove_schema`, which is the one table the checker and both evaluators already

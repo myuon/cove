@@ -1,0 +1,14 @@
+error[cove::test::failed]: test `laws.arraysAreShort` failed for `items = [0, 0, 0]` (seed 13370232417382482660, 3 case(s) passed, shrunk 5 time(s)): assertion failed: `items.length() < 3`
+  --> <e2e>/test_property/laws/laws.cove:37:3
+   |
+37 |   assert(items.length() < 3)?
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: A test reports failure as an `Err`, the way every Cove function reports expected failure.
+  help: `cove test --seed 13370232417382482660 --filter laws.arraysAreShort` runs this property again
+error[cove::test::failed]: test `laws.encodingNeverWritesPercentTwentyFive` failed for `text = "%", limit = 0` (seed 6359041024845030997, 46 case(s) passed, shrunk 8 time(s)): assertion failed: `!url.percentEncode(text).contains("%25") || limit > 1000`
+  --> <e2e>/test_property/laws/laws.cove:30:3
+   |
+30 |   assert(!url.percentEncode(text).contains("%25") || limit > 1000)?
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: A test reports failure as an `Err`, the way every Cove function reports expected failure.
+  help: `cove test --seed 6359041024845030997 --filter laws.encodingNeverWritesPercentTwentyFive` runs this property again

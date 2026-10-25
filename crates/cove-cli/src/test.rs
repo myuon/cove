@@ -50,20 +50,50 @@ use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
 
+use crate::property::{self, Arg, Shape, Verdict};
 use crate::{load, Backend, CliError};
 
 /// The diagnostic a test that needs a capability no host provides is
 /// reported as.
 const NO_HOST: &str = "cove::test::no_host";
 
-/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm>]`.
+/// How a suite runs its properties: how many cases each, and under which
+/// seed when one was named rather than derived from the property's name.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Properties {
+    pub(crate) cases: u32,
+    pub(crate) seed: Option<u64>,
+}
+
+impl Default for Properties {
+    fn default() -> Self {
+        Properties {
+            cases: property::DEFAULT_CASES,
+            seed: None,
+        }
+    }
+}
+
+/// Runs `cove test [path] [--filter <substring>] [--seed <n>] [--backend <ast|vm>]`.
 pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
     let mut backend = Backend::default_for_a_run();
+    let mut seed: Option<u64> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--seed" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Message("`--seed` needs a value".to_string()))?;
+                seed = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--seed` must be an unsigned 64-bit integer, found `{value}`"
+                    ))
+                })?);
+                i += 1;
+            }
             "--filter" => {
                 let value = args
                     .get(i + 1)
@@ -105,6 +135,10 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
         .iter()
         .map(String::as_str)
         .collect();
+    let properties = Properties {
+        cases: package.config.test.cases.unwrap_or(property::DEFAULT_CASES),
+        seed,
+    };
 
     let sources = Arc::new(sources);
     let program = Arc::new(program);
@@ -122,9 +156,11 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             &sources,
             &program,
             backend,
+            properties,
         ) {
-            None => println!("{}", result_line("ok", &name)),
-            Some(diagnostic) => {
+            Ok(None) => println!("{}", result_line("ok", &name)),
+            Ok(Some(cases)) => println!("{} ({cases} cases)", result_line("ok", &name)),
+            Err(diagnostic) => {
                 failed += 1;
                 println!("{}", result_line("fail", &name));
                 eprint!("{}", render(&sources, &diagnostic));
@@ -160,10 +196,12 @@ fn select<'a>(tests: &'a [DeclaredTest<'a>], filter: Option<&str>) -> Vec<&'a De
         .collect()
 }
 
-/// Runs one test, returning the diagnostic to report when it failed.
+/// Runs one test, answering how it passed — `Some(cases)` for a property,
+/// `None` for an ordinary test — or the diagnostic to report when it failed.
 ///
-/// Every test gets a registry of its own: a fake host holds state, and one
-/// test must not observe what another one left behind.
+/// Every test gets a registry of its own, and so does every case of a
+/// property: a fake host holds state, and one run must not observe what
+/// another one left behind.
 fn run_test(
     test: &DeclaredTest,
     root: &Path,
@@ -171,7 +209,8 @@ fn run_test(
     sources: &Arc<SourceMap>,
     program: &Arc<cove_sema::resolve::Program>,
     backend: Backend,
-) -> Option<Diagnostic> {
+    properties: Properties,
+) -> Result<Option<u32>, Box<Diagnostic>> {
     let required: Vec<&str> = test
         .entry
         .required_capabilities
@@ -179,17 +218,21 @@ fn run_test(
         .map(|capability| capability.as_str())
         .collect();
 
-    let mut hosts = HostRegistry::new(Grants::new(required.clone()));
-    register_hosts(&mut hosts, root, allow_real);
+    let hosts = || {
+        let mut hosts = HostRegistry::new(Grants::new(required.clone()));
+        register_hosts(&mut hosts, root, allow_real);
+        hosts
+    };
 
     // A capability no registered host module answers to cannot be granted at
     // all, fake or real. Saying so is more useful than letting the first call
     // report an unknown module.
+    let registry = hosts();
     if let Some(missing) = required
         .iter()
-        .find(|capability| !hosts.contains(capability))
+        .find(|capability| !registry.contains(capability))
     {
-        return Some(
+        return Err(Box::new(
             Diagnostic::error(
                 NO_HOST,
                 format!(
@@ -202,7 +245,7 @@ fn run_test(
             .help(format!(
                 "remove the dependency on `{missing}`, or run this code through `cove run` with a host that provides it"
             )),
-        );
+        ));
     }
 
     // A test is an entry, so it is lowered as one, one root per lowering, and
@@ -220,10 +263,107 @@ fn run_test(
         },
         limits: None,
     };
+    let explained = |failure| explain(test, failure);
+    let prepared = run
+        .prepare(test)
+        .map_err(|failure| Box::new(explained(*failure)))?;
+    if test.entry.decl.params.is_empty() {
+        return match run.run_prepared(test, &prepared, registry, Vec::new()) {
+            None => Ok(None),
+            Some(failure) => Err(Box::new(explained(failure))),
+        };
+    }
+    drop(registry);
+
+    // A property: lowered once above, and run once per generated case with
+    // a registry of its own (ADR 0121).
+    let (names, shapes) = property_parameters(test, program)?;
+    let name = test.qualified_name();
+    let seed = properties.seed.unwrap_or_else(|| property::seed_for(&name));
+    let verdict = property::check(&shapes, properties.cases, seed, |args| {
+        run.run_prepared(
+            test,
+            &prepared,
+            hosts(),
+            args.iter().map(Arg::value).collect(),
+        )
+    });
+    match verdict {
+        Verdict::Passed { cases } => Ok(Some(cases)),
+        Verdict::Failed {
+            passed,
+            shrinks,
+            args,
+            failure,
+        } => {
+            let mut diagnostic = explained(failure);
+            let shown = names
+                .iter()
+                .zip(&args)
+                .map(|(name, arg)| format!("{name} = {}", arg.literal()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let context = format!(
+                "for `{shown}` (seed {seed}, {passed} case(s) passed, shrunk {shrinks} time(s))"
+            );
+            let prefix = format!("test `{name}` failed");
+            diagnostic.message = match diagnostic.message.strip_prefix(&prefix) {
+                Some(rest) => format!("{prefix} {context}{rest}"),
+                None => format!("{} {context}", diagnostic.message),
+            };
+            let rerun =
+                format!("`cove test --seed {seed} --filter {name}` runs this property again");
+            diagnostic.help = Some(match diagnostic.help {
+                Some(help) => format!("{help}; {rerun}"),
+                None => rerun,
+            });
+            Err(Box::new(diagnostic))
+        }
+    }
+}
+
+/// A property's parameter names and the shapes the runner generates them
+/// at, read from the types the checker resolved.
+fn property_parameters(
+    test: &DeclaredTest,
+    program: &cove_sema::resolve::Program,
+) -> Result<(Vec<String>, Vec<Shape>), Box<Diagnostic>> {
+    let decl = &test.entry.decl;
+    let names = decl
+        .params
+        .iter()
+        .map(|param| param.name.node.clone())
+        .collect();
+    let types = program
+        .facts
+        .signature(decl.span.file, decl.span)
+        .map(|signature| signature.params.as_slice())
+        .unwrap_or_default();
+    let shapes: Option<Vec<Shape>> = types.iter().map(Shape::of).collect();
+    match shapes {
+        Some(shapes) if shapes.len() == decl.params.len() => Ok((names, shapes)),
+        // The checker refuses a property whose parameters the runner cannot
+        // generate, so this is the two disagreeing rather than a program.
+        _ => Err(Box::new(
+            Diagnostic::error(
+                cove_runtime::testing::FAILED,
+                format!(
+                    "test `{}` takes a parameter `cove test` cannot generate",
+                    test.qualified_name()
+                ),
+            )
+            .at(decl.name.span),
+        )),
+    }
+}
+
+/// A failure, with what a capability-open test owes a refusal at the Host
+/// boundary.
+fn explain(test: &DeclaredTest, failure: TestFailure) -> Diagnostic {
     let TestFailure {
         mut diagnostic,
         denied_capability,
-    } = run.run(test, hosts)?;
+    } = failure;
     if denied_capability.is_some() && test.entry.is_capability_open() {
         let note = capability_open_help(test);
         diagnostic.help = Some(match diagnostic.help {
@@ -231,7 +371,7 @@ fn run_test(
             None => note,
         });
     }
-    Some(diagnostic)
+    diagnostic
 }
 
 /// What a capability-open test owes a refusal at the Host boundary.
@@ -392,10 +532,18 @@ mod tests {
             .tests()
             .iter()
             .map(|test| {
-                let outcome = run_test(test, root, &allow_real, &sources, &program, backend);
+                let outcome = run_test(
+                    test,
+                    root,
+                    &allow_real,
+                    &sources,
+                    &program,
+                    backend,
+                    Properties::default(),
+                );
                 (
                     test.qualified_name(),
-                    outcome.map(|diagnostic| diagnostic.message),
+                    outcome.err().map(|diagnostic| diagnostic.message),
                 )
             })
             .collect()
@@ -465,8 +613,9 @@ mod tests {
                 &sources,
                 &program,
                 backend,
+                Properties::default(),
             )
-            .expect("the test fails");
+            .expect_err("the test fails");
             let rendered = render(&sources, &diagnostic);
             assert!(
                 rendered.contains("unit.cove:2:3"),
@@ -500,8 +649,9 @@ mod tests {
                 &sources,
                 &program,
                 backend,
+                Properties::default(),
             )
-            .expect("the test fails");
+            .expect_err("the test fails");
             let rendered = render(&sources, &diagnostic);
             assert!(
                 rendered.contains("something else"),
@@ -645,8 +795,9 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &sources,
             &program,
             Backend::Vm,
+            Properties::default(),
         )
-        .expect("the boundary refuses the call");
+        .expect_err("the boundary refuses the call");
         assert!(
             diagnostic.message.contains("`console` capability"),
             "{}",
@@ -722,6 +873,93 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
         assert_eq!(names(Some("alpha")), ["other.alpha", "unit.alpha"]);
         assert_eq!(names(Some("unit.")), ["unit.alpha", "unit.beta"]);
         assert!(names(Some("gamma")).is_empty());
+    }
+
+    /// A property runs on both evaluators, generated and shrunk the same way,
+    /// and its failure names the smallest case, the seed and the count of
+    /// cases that passed — `run_all` asserting the two agree is what pins
+    /// that the arguments reached each backend as the same values.
+    #[test]
+    fn a_property_runs_generated_cases_and_reports_a_shrunk_counterexample() {
+        let dir = package(
+            "property",
+            "",
+            "test fn small(n: Int) -> Result<Unit, Error> {\n  assert(n <= 100)?\n  Ok(())\n}\n\n\
+             test fn utf8RoundTrips(text: String, flags: Array<Bool>) -> Result<Unit, Error> {\n  \
+             assertEqual(String.fromUtf8(text.toUtf8())?, text)?\n  \
+             assert(flags.length() >= 0)?\n  Ok(())\n}\n\n\
+             test fn noPercent(text: String) -> Result<Unit, Error> {\n  assert(!text.contains(\"%\"))?\n  Ok(())\n}\n",
+        );
+        let results = run_all(dir.path(), &[]);
+        let seed = property::seed_for("unit.noPercent");
+        let message = results[0].1.as_deref().expect("a '%' is generated");
+        assert!(
+            message.starts_with(&format!(
+                "test `unit.noPercent` failed for `text = \"%\"` (seed {seed}, "
+            )),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(": assertion failed: `!text.contains(\"%\")`"),
+            "{message}"
+        );
+        let message = results[1]
+            .1
+            .as_deref()
+            .expect("an Int over 100 is generated");
+        assert!(
+            message.starts_with("test `unit.small` failed for `n = 101` ("),
+            "{message}"
+        );
+        assert_eq!(results[2], ("unit.utf8RoundTrips".to_string(), None));
+    }
+
+    /// A trap is a failure like an `Err`, and is shrunk like one.
+    #[test]
+    fn a_property_that_traps_is_shrunk_to_the_smallest_trapping_case() {
+        let dir = package(
+            "property-trap",
+            "",
+            "test fn doubles(n: Int) -> Result<Unit, Error> {\n  assert(n * 2 / 2 == n)?\n  Ok(())\n}\n",
+        );
+        let results = run_all(dir.path(), &[]);
+        let message = results[0]
+            .1
+            .as_deref()
+            .expect("an overflowing Int is generated");
+        assert!(
+            message.starts_with("test `unit.doubles` failed for `n = 4611686018427387904` ("),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_named_seed_changes_the_cases_and_reproduces_them() {
+        let dir = package(
+            "property-seed",
+            "",
+            "test fn small(n: Int) -> Result<Unit, Error> {\n  assert(n <= 100)?\n  Ok(())\n}\n",
+        );
+        let (sources, _, program) = check_fixture(dir.path());
+        let (sources, program) = (Arc::new(sources), Arc::new(program));
+        let test = program.tests()[0];
+        let message = |seed: Option<u64>, cases: u32| {
+            run_test(
+                &test,
+                dir.path(),
+                &BTreeSet::new(),
+                &sources,
+                &program,
+                Backend::Vm,
+                Properties { cases, seed },
+            )
+            .expect_err("the property fails")
+            .message
+        };
+        assert!(message(Some(1), 100).contains("(seed 1, "));
+        assert_eq!(message(Some(1), 100), message(Some(1), 100));
+        let derived = property::seed_for("unit.small");
+        assert_eq!(message(None, 100), message(Some(derived), 100));
     }
 
     #[test]

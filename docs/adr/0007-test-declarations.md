@@ -1,6 +1,7 @@
 # ADR 0007: Test declarations and `cove test`
 
 - Status: Accepted
+- Superseded in part by [ADR 0121](0121-a-test-fn-may-take-parameters.md) (parameterised tests)
 - Date: 2026-08-25
 - Implemented by: PR #19
 - Implementation status: complete

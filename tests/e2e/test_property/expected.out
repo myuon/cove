@@ -1,0 +1,5 @@
+fail  laws.arraysAreShort
+fail  laws.encodingNeverWritesPercentTwentyFive
+ok    laws.percentRoundTrips (100 cases)
+ok    laws.sortingKeepsLengthAndOrders (100 cases)
+ran 4 test(s), 2 passed, 2 failed

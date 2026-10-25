@@ -35,7 +35,11 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - `test fn name() -> Result<Unit, Error>` declares a test. `test` sits where
   `export` sits and excludes it: `cove test` is a test's only caller. The
   builtin `assert(condition)` and `assertEqual(actual, expected)` report a
-  failure as an `Err` that quotes the condition's source text.
+  failure as an `Err` that quotes the condition's source text. A test with
+  parameters, `test fn holds(text: String) -> Result<Unit, Error>`, is a
+  property: `cove test` generates its arguments from their types (`Int`,
+  `String`, `Bool`, `Array`s of those), runs it on many seeded cases, and
+  shrinks a failing one.
 - Calls support static argument labels: `request(url: endpoint, timeout: 5s)`.
   Labels are parameter names, so they appear in declaration order.
 - Struct initialization uses synthesized labeled calls: `User(name: "A")`.
@@ -331,7 +335,9 @@ the boundary alone, and `cove check` warns that it is.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is
-deterministic, and `[test] allow_real = [...]` names the exceptions. It grants
+deterministic, and `[test] allow_real = [...]` names the exceptions; a
+property's cases are seeded from its name for the same reason, `[test] cases`
+sets how many there are, and `cove test --seed` replays another seed. It grants
 a capability-open test that same lower bound rather than widening it, and says
 so when the boundary then refuses a call.
 

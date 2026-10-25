@@ -105,7 +105,14 @@ module-private unless `export`ed. `opaque` is a modifier on an exported
 struct: `export opaque struct` narrows what the export publishes to the
 type's name and its exported methods and associated functions, withholding
 the fields and the labeled constructor they synthesize (see Opaque structs,
-below). `test fn` sits where `export` sits and excludes it.
+below). `test fn` sits where `export` sits and excludes it. A `test fn`
+returns `Result<Unit, Error>`, is not `async`, and binds no type parameter.
+One with parameters is a *property*
+([ADR 0121](adr/0121-a-test-fn-may-take-parameters.md)): `cove test`
+generates its arguments, so each parameter is an ordinary one — not `var`,
+not variadic — of a type the runner generates, which is `Int`, `String`,
+`Bool`, or an `Array` of one of those, nested arrays included. Any other is
+`cove::type::test`, at the parameter.
 `impl Trait for Type` is the only way a conformance is declared.
 A builtin type's name — `Unit`, `Int`, `Option`, and the rest of
 `docs/BUILTINS.md` — means the builtin in every type position, so no struct,
