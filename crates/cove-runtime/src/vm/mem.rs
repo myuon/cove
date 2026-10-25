@@ -171,6 +171,32 @@ pub(crate) const SEGMENT_WORDS: u64 = 1 << 20;
 /// allocates it once rather than at every frame of its first few calls.
 const MIN_STACK_ROOM: usize = 256;
 
+/// The words at the bottom of every stack segment that are in no frame.
+///
+/// One, so that no frame word has the segment's first address. Segment 0
+/// begins at linear address 0, and 0 is the null place: an address slot no
+/// formation reached holds it, and the machine refuses to follow it
+/// ([ADR 0120]). If the outermost frame began there, its slot 0 would be a
+/// place nobody formed, read and written with no need held to it — or a
+/// program passing that slot as a `var` argument would be refused for a null
+/// it never wrote.
+///
+/// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+const STACK_GUARD: u64 = 1;
+
+/// A segment's storage before its first frame: the guard words, in use and
+/// zero, and room for a short run's frames.
+fn empty_stack(origin: u64) -> Stack {
+    Stack {
+        origin,
+        words: vec![0; MIN_STACK_ROOM],
+        top: WordStack {
+            len: STACK_GUARD,
+            room: MIN_STACK_ROOM as u64,
+        },
+    }
+}
+
 /// How many stack segments the address space reserves, and so how many tasks
 /// of one run may be executing at once.
 ///
@@ -232,6 +258,13 @@ const _: () = assert!(
     CHUNK_WORDS == cove_native::HEAP_CHUNK_WORDS,
     "a heap chunk is the size `cove_native` says it is"
 );
+
+/// The bit a root carries when it is the address of a word *inside* an object
+/// rather than of its header: what [`Roots::each_root`] hands over for a frame's
+/// `Repr::Addr` slot that names a field (ADR 0120). The collection marks the
+/// object the address is inside. No linear address reaches the bit: the two
+/// regions together are far short of 2^63 words.
+pub(crate) const INTERIOR: u64 = 1 << 63;
 
 /// Whether a linear address names a word of the stack region.
 ///
@@ -1546,9 +1579,19 @@ impl Space {
         // reclaiming memory because there is none left.
         let mut work: Vec<u64> = Vec::new();
         let bump = STACK_WORDS + alloc.bump;
+        let mut interior = Vec::new();
         for &addr in roots {
-            if reachable(addr, bump) && set_mark(&mut alloc.marks, addr) {
+            if addr & INTERIOR != 0 {
+                interior.push(addr & !INTERIOR);
+            } else if reachable(addr, bump) && set_mark(&mut alloc.marks, addr) {
                 work.push(addr);
+            }
+        }
+        if !interior.is_empty() {
+            for addr in self.containers(alloc, layouts, interior) {
+                if set_mark(&mut alloc.marks, addr) {
+                    work.push(addr);
+                }
             }
         }
 
@@ -1565,6 +1608,48 @@ impl Space {
             live_words,
             collections: alloc.collections,
         }
+    }
+
+    /// The objects `interior` addresses point into: one walk of the heap's
+    /// blocks, the sweep's own, over the addresses in order.
+    ///
+    /// What a frame's `Repr::Addr` slot holds when it names a field of an
+    /// object (ADR 0120): the address of a payload word, not of a header, so
+    /// it cannot be marked as it is. The lowering keeps every such object in a
+    /// `Ref` slot for as long as the address lives, and so a collection never
+    /// needed this; a program that clears that slot first and goes on using
+    /// the address would be writing into a block the sweep handed to the next
+    /// allocation. So an address into the heap is a root too, of the object it
+    /// is inside. An address below the static floor names an object that is
+    /// never collected, and one in no live block — the hole, a free block,
+    /// past the bump — names nothing to keep.
+    fn containers(&self, alloc: &Alloc, layouts: &[Layout], mut interior: Vec<u64>) -> Vec<u64> {
+        interior.sort_unstable();
+        interior.dedup();
+        let mut found = Vec::new();
+        let end = STACK_WORDS + alloc.bump;
+        let mut addr = self.static_end.load(Ordering::Relaxed);
+        let mut at = 0;
+        while addr < end && at < interior.len() {
+            if addr == STACK_WORDS + alloc.hole {
+                addr = STACK_WORDS + CHUNK_WORDS;
+                continue;
+            }
+            let next = addr + self.object_words(layouts, addr);
+            while at < interior.len() && interior[at] < addr {
+                at += 1;
+            }
+            let mut inside = false;
+            while at < interior.len() && interior[at] < next {
+                inside = true;
+                at += 1;
+            }
+            if inside && self.object_layout(addr) != LayoutId::FREE {
+                found.push(addr);
+            }
+            addr = next;
+        }
+        found
     }
 
     /// Marks and enqueues every object the object at `addr` refers to.
@@ -2290,11 +2375,7 @@ impl Memory {
         let space = Arc::new(Space::new(heap_words_budget));
         let at = space.attach().expect("a new space has every segment free");
         Memory {
-            stack: Stack {
-                origin: segment_origin(at),
-                words: Vec::new(),
-                top: WordStack::default(),
-            },
+            stack: empty_stack(segment_origin(at)),
             space,
             at,
         }
@@ -2309,11 +2390,7 @@ impl Memory {
     pub(crate) fn for_task(&self) -> Result<Memory, NoSegment> {
         let at = self.space.attach()?;
         Ok(Memory {
-            stack: Stack {
-                origin: segment_origin(at),
-                words: Vec::new(),
-                top: WordStack::default(),
-            },
+            stack: empty_stack(segment_origin(at)),
             space: Arc::clone(&self.space),
             at,
         })
@@ -2576,7 +2653,7 @@ impl Memory {
     /// nothing unwound them. The next top-level call on the same machine must
     /// not be built on top of them.
     pub(crate) fn reset_stack(&mut self) {
-        self.stack.top.len = 0;
+        self.stack.top.len = STACK_GUARD;
     }
 
     /// The word at `slot` of the frame based at `base`.
@@ -3126,7 +3203,8 @@ mod tests {
     fn a_frame_starts_zeroed() {
         let mut mem = Memory::new(16);
         let base = mem.push_frame(4).unwrap();
-        assert_eq!(base, 0);
+        // Past the guard word, so that no slot is the null place.
+        assert_eq!(base, STACK_GUARD);
         for slot in 0..4 {
             assert_eq!(mem.slot(base, slot), 0);
         }
@@ -3141,7 +3219,7 @@ mod tests {
         assert_eq!(second, first + 3);
 
         mem.pop_frame(second);
-        assert_eq!(mem.stack_words(), 3);
+        assert_eq!(mem.stack_words(), STACK_GUARD + 3);
         // The same words come back, and they come back zero: a `Ref` slot the
         // callee has not written must read as null, not as the last frame's
         // address.
@@ -3155,8 +3233,10 @@ mod tests {
     fn the_stack_segment_is_the_limit() {
         let mut mem = Memory::new(16);
         // One frame just short of the segment, then one word too many.
-        let base = mem.push_frame(SEGMENT_WORDS as u32 - 2).unwrap();
-        assert_eq!(base, 0);
+        let base = mem
+            .push_frame((SEGMENT_WORDS - 2 - STACK_GUARD) as u32)
+            .unwrap();
+        assert_eq!(base, STACK_GUARD);
         assert_eq!(mem.push_frame(2), Err(Overflow));
         assert_eq!(mem.push_frame(1).unwrap(), SEGMENT_WORDS - 2);
     }
@@ -3170,14 +3250,17 @@ mod tests {
     fn the_published_room_is_storage_and_a_growth_moves_it() {
         let mut mem = Memory::new(16);
         let room = |mem: &mut Memory| unsafe { (*mem.word_stack()).room };
-        assert_eq!(room(&mut mem), 0, "no storage, no room");
+        // The guard word's storage is committed with the segment, and is the
+        // first room.
+        assert_eq!(room(&mut mem), MIN_STACK_ROOM as u64, "the first room");
         let first = mem.push_frame(3).unwrap();
         mem.set_slot(first, 2, 77);
         let held = mem.words_ptr();
         assert_eq!(room(&mut mem), MIN_STACK_ROOM as u64);
         assert_eq!(mem.stack_capacity(), MIN_STACK_ROOM);
         // Up to the room, nothing moves.
-        mem.push_frame(MIN_STACK_ROOM as u32 - 3).unwrap();
+        mem.push_frame(MIN_STACK_ROOM as u32 - 3 - STACK_GUARD as u32)
+            .unwrap();
         assert_eq!(
             mem.words_ptr(),
             held,
@@ -3192,7 +3275,8 @@ mod tests {
         // And at the segment, the room stops one short of the bound
         // `push_frame` refuses at.
         mem.reset_stack();
-        mem.push_frame(SEGMENT_WORDS as u32 - 2).unwrap();
+        mem.push_frame((SEGMENT_WORDS - 2 - STACK_GUARD) as u32)
+            .unwrap();
         mem.push_frame(1).unwrap();
         assert_eq!(
             mem.stack_capacity() as u64,
@@ -3224,8 +3308,8 @@ mod tests {
 
         let here = first.push_frame(4).unwrap();
         let there = second.push_frame(4).unwrap();
-        assert_eq!(here, 0);
-        assert_eq!(there, SEGMENT_WORDS);
+        assert_eq!(here, STACK_GUARD);
+        assert_eq!(there, SEGMENT_WORDS + STACK_GUARD);
         assert!(is_stack(here) && is_stack(there));
         // The same slot number, two different addresses, and neither task's
         // frame can reach the other's however deep it nests: the segment ends

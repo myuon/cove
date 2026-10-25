@@ -497,12 +497,17 @@ mod tests {
     use crate::repr::{RefMap, Repr};
     use crate::ArgsId;
 
-    const INT: LayoutId = LayoutId(0);
-    const STR: LayoutId = LayoutId(1);
-    const POINT: LayoutId = LayoutId(2);
+    const INT: LayoutId = LayoutId(1);
+    const STR: LayoutId = LayoutId(2);
+    const POINT: LayoutId = LayoutId(3);
+
+    const BYTES: LayoutId = LayoutId(4);
+    const BUFFER: LayoutId = LayoutId(5);
+    const BOXED: LayoutId = LayoutId(6);
 
     fn layouts() -> Vec<Layout> {
         vec![
+            Layout::free(),
             Layout::word("Int", Repr::Int),
             Layout::object("String", Shape::Str),
             Layout::inline(
@@ -513,6 +518,9 @@ mod tests {
                 },
                 vec![Repr::Int, Repr::Int],
             ),
+            Layout::object("Bytes", Shape::Bytes),
+            Layout::object("ByteBuffer", Shape::ByteBuffer),
+            Layout::object("Any", Shape::Boxed),
         ]
     }
 
@@ -557,6 +565,9 @@ mod tests {
             }],
             layouts: layouts(),
             str_layout: STR,
+            bytes_layout: BYTES,
+            buffer_layout: BUFFER,
+            boxed_layout: BOXED,
             args: vec![vec![
                 arg(3, STR),
                 arg(1, INT),

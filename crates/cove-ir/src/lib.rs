@@ -61,8 +61,9 @@ pub use inst::{
     ShiftOp, Slot, Storage, Validation, SHIFT_COUNT_GREATEST, SHIFT_COUNT_LEAST,
 };
 pub use layout::{
-    enum_layout, finishes_as_keyed_run_of, is_entry_of, reads_as_units_of, struct_layout, Case,
-    Field, Layout, LayoutId, Part, Shape, SHARED_STATE, SHARED_VALUE,
+    admits_field, admits_unit, enum_layout, field_agrees, finishes_as_keyed_run_of, is_entry_of,
+    reads_as_units_of, struct_layout, unit_agrees, unit_words, Access, Case, Field, Layout,
+    LayoutId, Part, Shape, SHARED_STATE, SHARED_VALUE,
 };
 pub use lower::{lower, lower_entry, lower_roots};
 pub use program::{

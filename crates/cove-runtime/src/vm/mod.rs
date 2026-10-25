@@ -1222,6 +1222,9 @@ impl<'a> Vm<'a> {
     /// which is exactly the retention the static reference map was careful
     /// not to be.
     fn words_of(&mut self, function: &Function, args: &[Value]) -> Result<Vec<u64>, RuntimeError> {
+        // A program the machine refused is refused here, before an argument
+        // is converted at a layout the verifier did not accept (ADR 0120).
+        self.machine.runnable()?;
         let params = function.params.clone();
         let mark = self.machine.temps();
         let mut words = Vec::with_capacity(args.len());

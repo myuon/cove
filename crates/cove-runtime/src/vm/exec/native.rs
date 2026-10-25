@@ -1217,9 +1217,10 @@ unsafe extern "C" fn field_load(
     pc: u32,
     addr: u64,
     at: u32,
-    width: u32,
+    layout: u32,
     into: u64,
 ) -> u32 {
+    let layout = LayoutId(layout);
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
 
@@ -1231,8 +1232,9 @@ unsafe extern "C" fn field_load(
             .last()
             .expect("a native frame is executing")
             .function;
+        let width = machine.width(layout);
         machine
-            .checked(addr, at, width)
+            .field(addr, at, layout, false)
             .map(|()| {
                 machine
                     .mem
@@ -1435,9 +1437,10 @@ unsafe extern "C" fn field_store(
     pc: u32,
     addr: u64,
     at: u32,
-    width: u32,
+    layout: u32,
     from: u64,
 ) -> u32 {
+    let layout = LayoutId(layout);
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
 
@@ -1449,8 +1452,9 @@ unsafe extern "C" fn field_store(
             .last()
             .expect("a native frame is executing")
             .function;
+        let width = machine.width(layout);
         machine
-            .checked(addr, at, width)
+            .field(addr, at, layout, true)
             .map(|()| {
                 machine
                     .mem
@@ -1951,7 +1955,7 @@ unsafe fn call_body<const MASK: u64>(
                 Some(slot) => {
                     let object = machine.mem.word_at(base as usize + slot as usize);
                     machine
-                        .callee_of(object)
+                        .closure_callee(object, caller.function, pc as usize)
                         .map(|callee| (callee, Some(object)))
                         .map_err(|error| error.at(span))
                 }
@@ -2408,6 +2412,19 @@ fn raised(
             ctx.raise_a,
             ctx.raise_b - 1
         )),
+        // ADR 0120's two checks emitted code makes itself, worded by the
+        // machine's own readers so that both tiers say the same thing.
+        Some(Raise::UnitRead) => machine.not_its_unit(
+            LayoutId(ctx.raise_a as u32),
+            LayoutId(ctx.raise_b as u32),
+            false,
+        ),
+        Some(Raise::UnitWrite) => machine.not_its_unit(
+            LayoutId(ctx.raise_a as u32),
+            LayoutId(ctx.raise_b as u32),
+            true,
+        ),
+        Some(Raise::NotBytes) => machine.not_bytes(LayoutId(ctx.raise_a as u32)),
         // `Raise::Called` with nothing stashed, or a code no code generator
         // emits. Both are this crate's mistake rather than the program's, and
         // both are reported rather than papered over.
@@ -2933,11 +2950,11 @@ unsafe extern "C" fn counted_run_copy(
 }
 counted!(
     /// [`field_load`], counted.
-    counted_field_load => field_load.field_load(pc: u32, addr: u64, at: u32, width: u32, into: u64) -> u32
+    counted_field_load => field_load.field_load(pc: u32, addr: u64, at: u32, layout: u32, into: u64) -> u32
 );
 counted!(
     /// [`field_store`], counted.
-    counted_field_store => field_store.field_store(pc: u32, addr: u64, at: u32, width: u32, from: u64) -> u32
+    counted_field_store => field_store.field_store(pc: u32, addr: u64, at: u32, layout: u32, from: u64) -> u32
 );
 counted!(
     /// [`order_str`], counted. The charge is one counter write on a machine that

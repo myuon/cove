@@ -1018,6 +1018,11 @@ pub const FLOAT: LayoutId = LayoutId(26);
 /// them a reference (issue #514's F4).
 pub const IDENTITY_TABLE: LayoutId = LayoutId(27);
 
+/// The store of a `Vector<Pair>`: a growable run of two-word elements. An
+/// object's header has to be a run of the element a field or element access
+/// names (ADR 0120), so a `PAIR_VECTOR`'s store is this and not `STORE`.
+pub const STORE_PAIR: LayoutId = LayoutId(28);
+
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
 }
@@ -1153,6 +1158,13 @@ pub fn program(function: Function) -> Program {
     layouts.push(Layout::object("Bytes", cove_ir::Shape::Bytes));
     layouts.push(Layout::word("Float", Repr::Float));
     layouts.push(cove_ir::dynamic::identity_table_layout());
+    layouts.push(Layout::object(
+        "Vector",
+        cove_ir::Shape::Elements {
+            elem: PAIR,
+            growable: true,
+        },
+    ));
     Program {
         functions: vec![function],
         layouts,
@@ -6689,7 +6701,12 @@ pub fn a_byte_buffer(heap: &mut Heap, at: u64, len: u64, capacity: u32) -> u64 {
 /// is the capacity *in elements*.
 pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: u32) -> u64 {
     let header = heap.object(at, layout, 0);
-    let store = heap.object(at + 8, STORE, capacity);
+    let store_layout = if layout == PAIR_VECTOR {
+        STORE_PAIR
+    } else {
+        STORE
+    };
+    let store = heap.object(at + 8, store_layout, capacity);
     heap.set(at + 1, u64::from(len));
     heap.set(at + 2, store);
     header
@@ -7986,7 +8003,7 @@ pub fn a_load_elem_strides_and_bounds_its_index<A: Arm>() {
     let at = HEAP_CHUNK_WORDS - 4;
     let build = || {
         let mut heap = Heap::new(2);
-        heap.object(at, PAIR, 3);
+        heap.object(at, ARRAY_PAIR, 3);
         for word in 0..6u64 {
             heap.set(at + 1 + word, 100 + word);
         }
@@ -8055,7 +8072,7 @@ pub fn a_store_elem_strides_and_bounds_its_index<A: Arm>() {
     // two-word elements.
     let at = HEAP_CHUNK_WORDS + 41;
     let mut heap = Heap::new(2);
-    let addr = heap.object(at, PAIR, 3);
+    let addr = heap.object(at, ARRAY_PAIR, 3);
     let mut words = vec![addr, 2, 0x1111, 0x2222];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
     assert_eq!(answer.outcome, Outcome::Returned);
@@ -8116,7 +8133,7 @@ pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
     let at = HEAP_CHUNK_WORDS - 2;
     let build = || {
         let mut heap = Heap::new(2);
-        heap.object(at, INT, bytes.len() as u32);
+        heap.object(at, BYTES, bytes.len() as u32);
         for (word, run) in bytes.chunks(8).enumerate() {
             let mut packed = 0u64;
             for (byte, value) in run.iter().enumerate() {
@@ -8909,7 +8926,7 @@ pub fn descriptor(kind: cove_ir::DynamicKind, name: u64, fields: u64) -> u64 {
         | fields << cove_native::DYN_COUNT_SHIFT
 }
 
-/// The table [`the_cheap_observations_are_answered_inline`] publishes, by the
+/// The table [`the_type_observations_are_answered_inline_and_the_view_reads_are_not`] publishes, by the
 /// suite's own layout ids: the ids mean only what this table says.
 fn inline_table() -> Vec<u64> {
     use cove_ir::DynamicKind as K;
@@ -8950,18 +8967,21 @@ fn observe_inline<A: Arm>(
     (answered, observed)
 }
 
-/// **Six observations are answered in emitted code, from the view's words and
-/// the descriptor table, without a call** — the kind, the type test, a scalar
-/// read, a case, a child count and the identity question — and each answer is
-/// the one `cove-runtime`'s `vm::exec::dynamic` gives for a layout with that
-/// descriptor: its kind; kind and name number compared; the payload word at
-/// `at`, or the owner for a `String`; an enum's first word; a struct's field
-/// count, a run's header length, twice a map's, a vector's length word, and
-/// nought for a scalar; and one owner viewed twice at word 0 as its own
+/// **Three observations are answered in emitted code, from the view's words and
+/// the descriptor table, without a call** — the kind, the type test and the
+/// identity question — and each answer is the one `cove-runtime`'s
+/// `vm::exec::dynamic` gives for a layout with that descriptor: its kind; kind
+/// and name number compared; and one owner viewed twice at word 0 as its own
 /// `Vector` header — the scan of the first few pairs of a walk's path; past
 /// those the path is an identity set, whose entries are the helper's:
 /// [`an_identity_set_is_made_inline_and_entered_through_the_helper`].
-pub fn the_cheap_observations_are_answered_inline<A: Arm>() {
+///
+/// **A scalar read, a case and a child count are the helper's** (ADR 0120): it
+/// validates the view (`View::held`) before reading the owner's words, which
+/// emitted code does not, so each is one hand-over of the observation as it is
+/// and the double writes nothing.
+pub fn the_type_observations_are_answered_inline_and_the_view_reads_are_not<A: Arm>() {
+    use cove_ir::bytecode::Op;
     let mut heap = Heap::new(2);
     // A pair at 40 whose second word is 77, an array of five, a map of three
     // entries, a vector of length four, an enum in case 1.
@@ -9111,10 +9131,44 @@ pub fn the_cheap_observations_are_answered_inline<A: Arm>() {
         ),
     ];
     for (what, answer, inst, words, expected) in cases {
+        let handed = matches!(
+            inst,
+            Inst::DynRead { .. } | Inst::DynCase { .. } | Inst::DynCount { .. }
+        );
+        let seen = observation_of(&inst);
+        let op = match inst {
+            Inst::DynRead { .. } => Op::DynRead,
+            Inst::DynCase { .. } => Op::DynCase,
+            Inst::DynCount { .. } => Op::DynCount,
+            _ => Op::DynKind,
+        };
         let (answered, observed) = observe_inline::<A>(answer, inst, words, &heap);
         assert_eq!(answered.outcome, Outcome::Returned, "{what}");
-        assert_eq!(answered.returned[0], expected, "{what}");
-        assert_eq!(observed, Vec::new(), "{what}: answered without the helper");
+        if handed {
+            // ADR 0120: the helper validates the view before it reads it, so
+            // these are one hand-over each and the double writes nothing. The
+            // `expected` column is what the helper answers on the runtime's
+            // side, and is checked there.
+            assert_eq!(
+                answered.returned[0], 0xdead,
+                "{what}: the double writes nothing"
+            );
+            assert_eq!(
+                observed,
+                vec![Observed {
+                    pc: 0,
+                    op: u32::from(op.number()),
+                    a: seen.0,
+                    b: seen.1,
+                    c: seen.2,
+                    work: 0,
+                }],
+                "{what}: one hand-over, of the observation as it is"
+            );
+        } else {
+            assert_eq!(answered.returned[0], expected, "{what}");
+            assert_eq!(observed, Vec::new(), "{what}: answered without the helper");
+        }
     }
 }
 
@@ -9313,7 +9367,7 @@ pub fn an_identity_set_is_made_inline_and_entered_through_the_helper<A: Arm>() {
     }
 }
 
-/// The child table [`a_child_is_answered_inline_from_the_child_table`]
+/// The child table [`a_child_is_handed_to_the_helper_which_validates_the_view`]
 /// publishes, over [`inline_table`]'s ids: a pair of `Int`s, a pair whose
 /// second word is followed, `Option<Int>`, an array, a set, a vector of pairs,
 /// a vector whose element is followed, and a map of `Int` to `Int`.
@@ -9339,19 +9393,19 @@ fn child_table() -> Vec<u64> {
     table
 }
 
-/// **An inline child is answered in emitted code, from the child table,
-/// without a call** (#514 F2): a struct's field at the parent's word plus the
-/// field's offset, an enum's part of its current case, an array's and a set's
-/// element at the stride, a vector's element in its store, and a map's key and
-/// value — each the view `cove-runtime`'s `dynamic::child` gives, which keeps
-/// the parent's owner, or the vector's store, and adds the offset.
-///
-/// **Everything else is one hand-over of the observation as it is**, and the
-/// destination keeps what it held because the double writes nothing: an index
+/// **Every child is one hand-over of the observation as it is** (ADR 0120,
+/// which replaced #514 F2's inline answer from the child table): the helper
+/// validates the view before it projects a child, which emitted code does
+/// not. The cases are the ones the child table used to settle inline — a
+/// struct's field, an enum's part of its current case, an array's and a set's
+/// element, a vector's element in its store, and a map's key and value — and
+/// the ones it never did (an index
 /// past the count or below nought, an enum in a case its layout does not have
 /// or with no parts, a consumed vector, a child marked `DYN_SETTLE`, a kind
-/// with no children, a null owner, and a layout the descriptor asks about.
-pub fn a_child_is_answered_inline_from_the_child_table<A: Arm>() {
+/// with no children, a null owner, and a layout the descriptor asks about).
+/// None of them reaches the destination from emitted code: the double writes
+/// nothing, so the destination keeps what it held.
+pub fn a_child_is_handed_to_the_helper_which_validates_the_view<A: Arm>() {
     use cove_ir::bytecode::Op;
     use cove_ir::DynamicKind as K;
     let mut heap = Heap::new(2);
@@ -9510,30 +9564,26 @@ pub fn a_child_is_answered_inline_from_the_child_table<A: Arm>() {
             let observed = observed();
             forget_observed();
             assert_eq!(answered.outcome, Outcome::Returned, "{what}");
-            match expected {
-                Some(view) => {
-                    assert_eq!(answered.returned[0], view[word], "{what}: word {word}");
-                    assert_eq!(observed, Vec::new(), "{what}: answered without the helper");
-                }
-                None => {
-                    assert_eq!(
-                        answered.returned[0], asked[word],
-                        "{what}: the double writes nothing"
-                    );
-                    assert_eq!(
-                        observed,
-                        vec![Observed {
-                            pc: 0,
-                            op: u32::from(Op::DynChild.number()),
-                            a: 4,
-                            b: 0,
-                            c: 3,
-                            work: 0,
-                        }],
-                        "{what}: one hand-over, of the observation as it is"
-                    );
-                }
-            }
+            // Every child is the helper's, whether or not the child table
+            // could have projected it (`expected`): the helper validates the
+            // view first (ADR 0120), and the double writes nothing.
+            let _ = &expected;
+            assert_eq!(
+                answered.returned[0], asked[word],
+                "{what}: the double writes nothing"
+            );
+            assert_eq!(
+                observed,
+                vec![Observed {
+                    pc: 0,
+                    op: u32::from(Op::DynChild.number()),
+                    a: 4,
+                    b: 0,
+                    c: 3,
+                    work: 0,
+                }],
+                "{what}: one hand-over, of the observation as it is"
+            );
         }
     }
 }

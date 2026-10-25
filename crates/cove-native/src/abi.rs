@@ -556,6 +556,18 @@ pub enum Raise {
     /// and not the direction, and last for [`Raise::NegOverflowed`]'s reason:
     /// these numbers are an ABI.
     ShiftCount = 15,
+    /// `Machine::not_its_unit` for a read: an element instruction whose layout
+    /// is not the unit of the run it reached ([ADR 0120]). The object's header
+    /// layout is [`NativeCtx::raise_a`] and the instruction's is
+    /// [`NativeCtx::raise_b`].
+    ///
+    /// [ADR 0120]: ../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    UnitRead = 16,
+    /// The same, for a write.
+    UnitWrite = 17,
+    /// `Machine::not_bytes`: a byte read from an object that is not a run of
+    /// bytes, whose header layout is [`NativeCtx::raise_a`] (ADR 0120).
+    NotBytes = 18,
 }
 
 impl Raise {
@@ -583,6 +595,9 @@ impl Raise {
             13 => Some(Raise::Called),
             14 => Some(Raise::NegOverflowed),
             15 => Some(Raise::ShiftCount),
+            16 => Some(Raise::UnitRead),
+            17 => Some(Raise::UnitWrite),
+            18 => Some(Raise::NotBytes),
             _ => None,
         }
     }
@@ -952,12 +967,18 @@ pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u3
 /// # Safety
 ///
 /// As [`AllocFn`]: `ctx` is the pointer the entry point was called with.
+///
+/// `layout` is the instruction's own layout, whose width is how many words are
+/// copied: the helper holds the object's words to it, as `Machine::field` does
+/// on the encoded tier ([ADR 0120]).
+///
+/// [ADR 0120]: ../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
 pub type FieldLoadFn = unsafe extern "C" fn(
     ctx: *mut NativeCtx,
     pc: u32,
     addr: u64,
     at: u32,
-    width: u32,
+    layout: u32,
     into: u64,
 ) -> u32;
 
@@ -969,7 +990,7 @@ pub type FieldStoreFn = unsafe extern "C" fn(
     pc: u32,
     addr: u64,
     at: u32,
-    width: u32,
+    layout: u32,
     from: u64,
 ) -> u32;
 
@@ -1954,12 +1975,15 @@ mod tests {
             (13, Raise::Called),
             (14, Raise::NegOverflowed),
             (15, Raise::ShiftCount),
+            (16, Raise::UnitRead),
+            (17, Raise::UnitWrite),
+            (18, Raise::NotBytes),
         ] {
             assert_eq!(raise.abi(), code);
             assert_eq!(Raise::from_abi(code), Some(raise));
         }
         assert_eq!(Raise::from_abi(0), None);
-        assert_eq!(Raise::from_abi(16), None);
+        assert_eq!(Raise::from_abi(19), None);
 
         for (code, op) in [
             (0, GrowableOp::Alloc),

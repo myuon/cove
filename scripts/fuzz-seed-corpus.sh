@@ -26,7 +26,7 @@ cd "$root"
 corpus=fuzz/corpus
 
 if [ $# -eq 0 ]; then
-  set -- parse compile run structured image differential differential_source
+  set -- parse compile run structured image differential differential_source ir ir_mutate
 fi
 
 sources=()
@@ -48,9 +48,15 @@ for target in "$@"; do
       cargo build --profile checked -p cove-fuzz --quiet
       ./target/checked/cove-fuzz image-seed "$corpus/image" "${sources[@]}"
       ;;
-    structured | differential) ;;
+    # The image body of each source with a few bytes of edits behind it,
+    # written by `cove-fuzz ir-mutate-seed` for `image`'s reason.
+    ir_mutate)
+      cargo build --profile checked -p cove-fuzz --quiet
+      ./target/checked/cove-fuzz ir-mutate-seed "$corpus/ir_mutate" "${sources[@]}"
+      ;;
+    structured | differential | ir) ;;
     *)
-      echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source" >&2
+      echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source, ir, ir_mutate" >&2
       exit 2
       ;;
   esac

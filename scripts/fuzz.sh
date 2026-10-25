@@ -4,6 +4,7 @@
 #
 #   scripts/fuzz.sh <target> [seconds] [-- libFuzzer flags...]
 #   targets: parse compile run structured image differential differential_source
+#            ir ir_mutate
 #
 #   scripts/fuzz.sh run 300           # five minutes of `run`
 #   scripts/fuzz.sh structured 60 -- -jobs=4 -workers=4
@@ -28,7 +29,8 @@
 # - `-malloc_limit_mb=1024`: one allocation larger than this is reported at
 #   the allocation, with its stack, rather than as an RSS overrun later.
 # - `-max_len`: 64 KiB of source (the largest program in the tree is under
-#   that), 256 KiB of image body, 4 KiB of generator choices.
+#   that), 256 KiB of image body (`image`, and `ir_mutate`'s body and edits),
+#   4 KiB of generator choices (`structured`, `differential`, `ir`).
 # - `-dict`: Cove's keywords and operators, for the source targets.
 # - leaks: LeakSanitizer (Linux only; macOS has none) is left on, both
 #   libFuzzer's per-input check, which names the input, and the check at
@@ -56,10 +58,10 @@ case "$target" in
   # A generator reads its choices from the front, so a short input is a
   # short program; `-len_control=0` lets libFuzzer use the whole length at
   # once rather than growing towards it over the first hours.
-  structured | differential) max_len=4096 extra=(-len_control=0) ;;
-  image) max_len=262144 extra=() ;;
+  structured | differential | ir) max_len=4096 extra=(-len_control=0) ;;
+  image | ir_mutate) max_len=262144 extra=() ;;
   *)
-    echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source" >&2
+    echo "no target \`$target\`: parse, compile, run, structured, image, differential, differential_source, ir, ir_mutate" >&2
     exit 2
     ;;
 esac

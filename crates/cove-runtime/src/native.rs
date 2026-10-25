@@ -347,8 +347,26 @@ fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unav
     // is the comparison harness's question rather than this one's.
     let started = Instant::now();
     let mut stubs = 0;
+    // The code generator reads the program as freely as the encoder does, so
+    // it is handed only a program `cove_ir::verify` accepts (ADR 0120). One
+    // that does not verify compiles nothing: every function is refused, and
+    // the encoded machine it would fall back to refuses the program itself
+    // before its first instruction.
+    let verified = cove_ir::verify(program).is_ok();
     for at in 0..program.functions.len() {
         let id = FunctionId(at as u32);
+        if !verified {
+            refusals.push(Refused {
+                id,
+                name: program.function(id).qualified(),
+                reason: "the program does not verify".to_string(),
+                at: None,
+                instruction: None,
+                blocked: None,
+                blockers: Vec::new(),
+            });
+            continue;
+        }
         // A stub is a declaration with no body in this slice, so it is neither
         // compiled nor refused. See `NativeProgram::reachable` for why counting it
         // either way would misreport the run.

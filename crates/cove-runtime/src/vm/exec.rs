@@ -63,7 +63,7 @@ use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
-use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
+use crate::vm::mem::{self, Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::report::Counting;
 use crate::vm::{boundary, cell};
 use crate::wallclock::Instant;
@@ -85,6 +85,7 @@ use crate::value::Value;
 /// [ADR 0068](../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md)'s
 /// structural observations. A child for `encoded`'s reason: a view is read
 /// out of the machine's memory and the layout table, both of them private.
+mod agree;
 pub(crate) mod dynamic;
 pub(crate) mod encoded;
 mod frames;
@@ -178,6 +179,17 @@ impl Roots for Live<'_, '_> {
                 let word = machine.mem.slot(frame.base, slot);
                 if word != 0 {
                     f(word);
+                }
+            }
+            // An address into the heap keeps the object it is inside (ADR
+            // 0120): see `Space::containers`. A stack address, null included,
+            // names a frame, which is not collected.
+            if let Some(addrs) = machine.agree.addrs.get(frame.function.index()) {
+                for slot in addrs.iter() {
+                    let word = machine.mem.slot(frame.base, slot);
+                    if !mem::is_stack(word) {
+                        f(word | mem::INTERIOR);
+                    }
                 }
             }
         }
@@ -904,6 +916,10 @@ pub(crate) struct Machine<'a> {
     /// built once by [`dynamic::tables`] and shared with every task of a run,
     /// for [`Machine::fixed_payload_words`]' reasons.
     reflection: Arc<dynamic::Tables>,
+    /// Every layout's answers for [`Machine::field`] and [`Machine::unit`]'s
+    /// fast path, built once by [`agree::tables`] and shared with every task
+    /// of a run, for [`Machine::fixed_payload_words`]' reasons.
+    agree: Arc<agree::Tables>,
     /// [ADR 0055]'s function-entry table, while one is installed.
     ///
     /// `Program + FunctionId -> encoded entry | native entry`, and the reason it
@@ -970,6 +986,8 @@ pub(crate) struct Prepared {
     fixed_payload_words: Arc<[u32]>,
     /// See [`Machine::reflection`].
     reflection: Arc<dynamic::Tables>,
+    /// See [`Machine::agree`].
+    agree: Arc<agree::Tables>,
 }
 
 impl Prepared {
@@ -979,6 +997,29 @@ impl Prepared {
     /// encode is held here as the refusal, and every machine built from this
     /// preparation raises it before a frame is pushed.
     pub(crate) fn of(program: &Program) -> Prepared {
+        // The program itself first, before anything below indexes one of its
+        // tables: `cove_ir::verify` answers for any `Program`, however it was
+        // made (ADR 0120), and every table here, the encoder and the bytecode
+        // verifier read ids and widths freely. A program that does not verify
+        // is held as the refusal, with empty tables nothing will read, because
+        // `Machine::run` raises the refusal before it reads any of them.
+        if let Err(faults) = cove_ir::verify(program) {
+            return Prepared::refused(encoded::unverified(&faults));
+        }
+        Prepared::trusting(program)
+    }
+
+    /// `program` encoded and its tables built **without** `cove_ir::verify`:
+    /// for this crate's tests of the run-time checks that stand behind the
+    /// verifier, which a verified program cannot reach. Nothing else may call
+    /// it; [`Prepared::of`] is the boundary.
+    #[cfg(test)]
+    pub(crate) fn unverified(program: &Program) -> Prepared {
+        Prepared::trusting(program)
+    }
+
+    /// The preparation proper, over a program already known to verify.
+    fn trusting(program: &Program) -> Prepared {
         Prepared {
             // Encoded and verified here, once per program — not once per
             // machine — because nothing it reads is a machine's, and because
@@ -997,7 +1038,26 @@ impl Prepared {
                 .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
                 .collect(),
             reflection: dynamic::tables(program),
+            agree: agree::tables(program),
         }
+    }
+
+    /// A preparation that holds only `why`: what [`Prepared::of`] answers for
+    /// a program that does not verify.
+    fn refused(why: RuntimeError) -> Prepared {
+        Prepared {
+            encoded: Err(why),
+            widths: Arc::from([]),
+            word_runs: Arc::from([]),
+            fixed_payload_words: Arc::from([]),
+            reflection: dynamic::empty_tables(),
+            agree: Arc::default(),
+        }
+    }
+
+    /// Whether the program this was prepared from may be run at all.
+    pub(crate) fn is_runnable(&self) -> bool {
+        self.encoded.is_ok()
     }
 }
 
@@ -1011,6 +1071,19 @@ impl<'a> Machine<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(program: &'a Program, heap_words: usize) -> Machine<'a> {
         Machine::with_hosts(program, heap_words, None)
+    }
+
+    /// [`Machine::new`] over a program `cove_ir::verify` was not asked about:
+    /// see [`Prepared::unverified`].
+    #[cfg(test)]
+    pub(crate) fn unverified(program: &'a Program, heap_words: usize) -> Machine<'a> {
+        Machine::for_run(
+            program,
+            &Prepared::unverified(program),
+            heap_words,
+            None,
+            None,
+        )
     }
 
     /// A machine that calls hosts through `hosts`, with nothing above it.
@@ -1103,10 +1176,15 @@ impl<'a> Machine<'a> {
             word_runs: Arc::clone(&prepared.word_runs),
             fixed_payload_words: Arc::clone(&prepared.fixed_payload_words),
             reflection: Arc::clone(&prepared.reflection),
+            agree: Arc::clone(&prepared.agree),
             tier: None,
             counting: None,
         };
-        machine.literal_addrs = machine.place_literals();
+        // A program that was refused is never run, so its literals are not
+        // placed: placing them reads the layout table `verify` refused.
+        if prepared.is_runnable() {
+            machine.literal_addrs = machine.place_literals();
+        }
         machine
     }
 
@@ -1142,6 +1220,7 @@ impl<'a> Machine<'a> {
         word_runs: Arc<[Option<WordRun>]>,
         fixed_payload_words: Arc<[u32]>,
         reflection: Arc<dynamic::Tables>,
+        agree: Arc<agree::Tables>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -1198,6 +1277,7 @@ impl<'a> Machine<'a> {
             word_runs,
             fixed_payload_words,
             reflection,
+            agree,
             // Not the parent's: see the field. A spawned task runs on the
             // encoded tier.
             tier: None,
@@ -1452,6 +1532,14 @@ impl<'a> Machine<'a> {
     /// is borrowed mutably, and a run's tasks share the one encoding anyway.
     fn code(&self) -> Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError> {
         self.encoded.clone()
+    }
+
+    /// The refusal of a program this machine will not run, if it is one: what
+    /// [`Machine::run`] raises first, for a caller that has work to do before
+    /// it calls that — converting an entry's arguments — and must not do it
+    /// over a program that was refused.
+    pub(crate) fn runnable(&self) -> Result<(), RuntimeError> {
+        self.encoded.as_ref().map(|_| ()).map_err(Clone::clone)
     }
 
     /// The address of every program literal, or the refusal placing them
@@ -3076,6 +3164,15 @@ impl<'a> Machine<'a> {
     /// one too. They agree — a layout is one per lowered lambda — and the
     /// object's word is the one [`cove_ir::Inst::CallClosure`] is defined in
     /// terms of.
+    /// Whether the object at `addr`, which is not null, is a `Shared` cell —
+    /// the one family `lock` may compare-and-swap the first word of.
+    pub(crate) fn is_cell(&self, addr: u64) -> bool {
+        matches!(
+            self.program.layout(self.mem.object_layout(addr)).shape,
+            Shape::Shared { .. }
+        )
+    }
+
     pub(crate) fn callee_of(&self, addr: u64) -> Result<FunctionId, RuntimeError> {
         if addr == 0 {
             return Err(null_object());
@@ -3159,6 +3256,52 @@ impl<'a> Machine<'a> {
         self.order_strings(a, b).cmp(&0)
     }
 
+    /// How many bytes the string at `addr` holds, as the readers of a string
+    /// — a comparison, a trap's sentences, an assertion's message — read it:
+    /// its header length when it is a byte run, and nought for null or for an
+    /// object of any other family.
+    ///
+    /// A header's length counts bytes only in a `Str` or a `Bytes`; in a run
+    /// of elements it counts elements, and in a struct allocated with a count
+    /// it counts nothing the payload holds. Read as bytes anyway, it would
+    /// read past the object — and, from a run of references, read addresses,
+    /// which no two runs of one program agree on. No lowering hands these
+    /// readers anything but a string ([ADR 0120]), and none of them can fail,
+    /// so anything else reads as the empty string: an answer that is the same
+    /// on every tier and in every heap.
+    ///
+    /// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    pub(crate) fn byte_len(&self, addr: u64) -> usize {
+        if addr != 0 && self.is_byte_run(addr) {
+            self.mem.object_len(addr) as usize
+        } else {
+            0
+        }
+    }
+
+    /// Whether the object at `addr`, which is not null, is a run of bytes — a
+    /// `Str` or a `Bytes` — whose header length counts bytes.
+    #[inline]
+    pub(crate) fn is_byte_run(&self, addr: u64) -> bool {
+        let layout = self.mem.object_layout(addr);
+        layout == self.program.str_layout
+            || matches!(self.program.layout(layout).shape, Shape::Str | Shape::Bytes)
+    }
+
+    /// The refusal of a byte read from an object of `layout`, which holds none.
+    #[cold]
+    pub(crate) fn not_bytes(&self, layout: LayoutId) -> RuntimeError {
+        let name = self
+            .program
+            .layouts
+            .get(layout.index())
+            .map_or_else(|| layout.to_string(), |held| held.name.to_string());
+        RuntimeError::new(format!(
+            "this reads a byte of a `{name}`, which is not a run of bytes"
+        ))
+        .with_rule("A byte is read out of a `String` or a byte run, and nothing else.")
+    }
+
     /// `-1`, `0` or `1` as two string objects order by their bytes — the
     /// three-way order `ORDER_STR` answers, which is `String`'s own `Ord` and
     /// `MapKey`'s for a `Str`.
@@ -3179,14 +3322,7 @@ impl<'a> Machine<'a> {
         if a == b {
             return 0;
         }
-        let len = |addr: u64| {
-            if addr == 0 {
-                0
-            } else {
-                self.mem.object_len(addr) as usize
-            }
-        };
-        let (left, right) = (len(a), len(b));
+        let (left, right) = (self.byte_len(a), self.byte_len(b));
         let common = left.min(right);
         let mut at = 0;
         let mut word = 0;
@@ -3221,10 +3357,7 @@ impl<'a> Machine<'a> {
     /// which does not exist is a lowering bug the verifier will catch
     /// elsewhere, not something to unwind a comparison for.
     pub(crate) fn string_bytes(&self, addr: u64) -> Vec<u8> {
-        if addr == 0 {
-            return Vec::new();
-        }
-        let len = self.mem.object_len(addr) as usize;
+        let len = self.byte_len(addr);
         let mut out = Vec::with_capacity(len);
         for at in 0..len.div_ceil(8) {
             let word = self.mem.payload(addr, at as u32);
@@ -3488,6 +3621,16 @@ impl<'a> Machine<'a> {
                 "`{shown}` found a byte buffer of {len} byte(s) in a store of {capacity}"
             )));
         }
+        // The store word is a field the lowering stores, so its family is
+        // checked as the length is: a buffer's store is a byte run (ADR 0120).
+        if !matches!(
+            self.program.layout(self.mem.object_layout(store)).shape,
+            Shape::Bytes
+        ) {
+            return Err(RuntimeError::new(format!(
+                "`{shown}` found a byte buffer whose store is not a run of bytes"
+            )));
+        }
         Ok(Growable {
             owner,
             store,
@@ -3534,11 +3677,29 @@ impl<'a> Machine<'a> {
         if store == 0 {
             return Err(consumed_vector());
         }
+        // An owner's two words are written by field stores when the lowering
+        // builds one, so what they say is checked here and not assumed: the
+        // store is the growable run of this element, and the length is inside
+        // it (ADR 0120). Every word operation over a vector reads it through
+        // here before it reads or writes a unit.
+        let len = self.mem.payload(owner, GROWABLE_LEN);
+        let capacity = self.mem.object_len(store);
+        let is_store = matches!(
+            self.program.layout(self.mem.object_layout(store)).shape,
+            Shape::Elements { elem: held, growable: true } if held == elem
+        );
+        if !is_store || len > u64::from(capacity) {
+            return Err(RuntimeError::new(format!(
+                "a growable run of `{}` was expected here, and this vector's store or length is \
+                 not one",
+                self.program.layout(elem).name
+            )));
+        }
         Ok(Growable {
             owner,
             store,
-            len: self.mem.payload(owner, GROWABLE_LEN) as u32,
-            capacity: self.mem.object_len(store),
+            len: len as u32,
+            capacity,
             storage: cove_ir::Storage::Words(elem),
         })
     }
@@ -4343,6 +4504,24 @@ impl<'a> Machine<'a> {
         let segment = segment
             .map_err(|NoSegment| no_segment_left().at(span).with_rule(crate::budget::RULE))?;
 
+        // The body's answer is written into a box of `answer`'s width, so the
+        // body has to answer that (ADR 0120): the closure's function is a word
+        // of an object, and the `spawn` names the layout on its own.
+        let callee = self.callee_of(object).map_err(|error| error.at(span))?;
+        let returns = self.program.function(callee).returns;
+        let layouts = &self.program.layouts;
+        let words = |id: LayoutId| layouts.get(id.index()).map(|layout| &layout.words);
+        if words(returns) != words(answer) {
+            return Err(RuntimeError::new(format!(
+                "this spawns `{}` as a task answering a `{}`, and it answers a `{}`",
+                self.program.function(callee).qualified(),
+                self.program.layout(answer).name,
+                self.program.layout(returns).name
+            ))
+            .with_rule("A task is spawned as what its body answers.")
+            .at(span));
+        }
+
         // Then the answer's home, allocated before the thread exists so that
         // it is a root of this task from the moment it can hold anything. The
         // closure is in a `Repr::Ref` slot of a live frame, so a collection
@@ -4395,6 +4574,7 @@ impl<'a> Machine<'a> {
         let word_runs = Arc::clone(&self.word_runs);
         let fixed_payload_words = Arc::clone(&self.fixed_payload_words);
         let reflection = Arc::clone(&self.reflection);
+        let agree = Arc::clone(&self.agree);
         let handle = threads.spawn(move || {
             run_task(
                 program,
@@ -4415,6 +4595,7 @@ impl<'a> Machine<'a> {
                 word_runs,
                 fixed_payload_words,
                 reflection,
+                agree,
             )
         });
 
@@ -4520,6 +4701,22 @@ impl<'a> Machine<'a> {
         self.join(at, running);
         match &self.children[at].state {
             ChildState::Settled => {
+                // A task handle is one word with no layout, so the `await`
+                // names the answer's layout and the task holds its own
+                // (ADR 0120): they are held to each other word for word, or
+                // the await would read the task's answer box at another width.
+                let held = self.children[at].layout;
+                let layouts = &self.program.layouts;
+                let words = |id: LayoutId| layouts.get(id.index()).map(|layout| &layout.words);
+                if words(held) != words(answer) {
+                    return Err(RuntimeError::new(format!(
+                        "this awaits a task as a `{}`, and the task answers a `{}`",
+                        self.program.layout(answer).name,
+                        self.program.layout(held).name
+                    ))
+                    .with_rule("A task is awaited as what its body answers.")
+                    .at(span));
+                }
                 let width = self.width(answer);
                 let home = self.children[at].answer;
                 Ok(self.mem.read_words(self.mem.payload_addr(home, 1), width))
@@ -5453,6 +5650,7 @@ fn run_task(
     word_runs: Arc<[Option<WordRun>]>,
     fixed_payload_words: Arc<[u32]>,
     reflection: Arc<dynamic::Tables>,
+    agree: Arc<agree::Tables>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -5468,6 +5666,7 @@ fn run_task(
         word_runs,
         fixed_payload_words,
         reflection,
+        agree,
     );
     machine.watch(debugger);
     let started = Instant::now();
@@ -5612,6 +5811,26 @@ pub(crate) fn consumed_vector() -> RuntimeError {
 /// removed is the *other* refusal `lock` used to make; this one it kept, and
 /// gave the reason: locking the same cell twice from one task is a live lock
 /// state, and no collector can answer one.
+/// A `lock` or an `unlock` of an object that is not a `Shared` cell.
+///
+/// What is read as a cell's state word is the object's first payload word, so
+/// a lock on anything else would compare-and-swap a word of a string, a run or
+/// a struct — and a word that already held a non-zero value would read as a
+/// cell some other task holds, and the lock would wait for that task forever.
+/// No lowering emits one ([ADR 0120]); a program that does is answered here.
+///
+/// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+pub(crate) fn not_a_cell() -> RuntimeError {
+    RuntimeError::new("this value is not a `Shared`, so it cannot be locked")
+        .with_rule("`lock` and its end are made on a `Shared` cell and nothing else.")
+}
+
+/// An `unlock` of a cell this task is not inside, or not innermost inside.
+pub(crate) fn not_held() -> RuntimeError {
+    RuntimeError::new("this `Shared` is given back by a task that is not inside it")
+        .with_rule("A `lock` region is left by the task that entered it, innermost first.")
+}
+
 fn reentrant_lock() -> RuntimeError {
     RuntimeError::new("this task already holds this `Shared`, so `lock` would wait for itself")
         .with_rule(
@@ -5722,7 +5941,7 @@ pub(crate) mod tests {
                 .map(|(name, parts)| (Arc::from(*name), parts.clone()))
                 .collect();
             let (cases, payload) = cove_ir::enum_layout(&named, &self.program.layouts);
-            let mut words = vec![Repr::Int];
+            let mut words = vec![Repr::Tag];
             words.extend_from_slice(&payload);
             self.push(Layout::inline(name, Shape::Enum { cases, payload }, words))
         }
@@ -5853,7 +6072,34 @@ pub(crate) mod tests {
 
         /// Checks the program the way the lowering must, so a malformed test
         /// fixture fails as a fixture rather than as a machine bug.
-        pub(crate) fn done(self) -> Program {
+        pub(crate) fn done(mut self) -> Program {
+            // The program-wide layouts the machine allocates by must be the
+            // shapes they are named for, whether or not the fixture used them.
+            self.seed();
+            for (shape, name) in [
+                (Shape::Str, "String"),
+                (Shape::Bytes, "Bytes"),
+                (Shape::ByteBuffer, "ByteBuffer"),
+            ] {
+                let held = match shape {
+                    Shape::Str => self.program.str_layout,
+                    Shape::Bytes => self.program.bytes_layout,
+                    _ => self.program.buffer_layout,
+                };
+                let right = self
+                    .program
+                    .layouts
+                    .get(held.index())
+                    .is_some_and(|layout| layout.shape == shape);
+                if !right {
+                    let id = self.layout(name, shape.clone());
+                    match shape {
+                        Shape::Str => self.program.str_layout = id,
+                        Shape::Bytes => self.program.bytes_layout = id,
+                        _ => self.program.buffer_layout = id,
+                    }
+                }
+            }
             cove_ir::verify(&self.program).expect("a hand-written test program is well formed");
             self.program
         }
@@ -7518,7 +7764,7 @@ pub(crate) mod tests {
                 Repr::Bool,
                 // The `Msg` is at slots 1–3: a discriminant, `Text`'s
                 // reference and `Count`'s integer.
-                Repr::Int,
+                Repr::Tag,
                 Repr::Ref,
                 Repr::Int,
                 Repr::Ref,
@@ -7531,7 +7777,11 @@ pub(crate) mod tests {
                     layout: cell,
                     len: Len::Count(1200),
                 },
-                Inst::Int { dst: 1, value: 0 },
+                Inst::Tag {
+                    dst: 1,
+                    layout: msg,
+                    case: cove_ir::CaseId(0),
+                },
                 Inst::Copy {
                     dst: 2,
                     src: 4,
@@ -7549,7 +7799,11 @@ pub(crate) mod tests {
                     slot: 1,
                     layout: msg,
                 },
-                Inst::Int { dst: 1, value: 1 },
+                Inst::Tag {
+                    dst: 1,
+                    layout: msg,
+                    case: cove_ir::CaseId(1),
+                },
                 Inst::Int { dst: 3, value: 5 },
                 Inst::Alloc {
                     dst: 4,
@@ -7563,7 +7817,7 @@ pub(crate) mod tests {
         let program = build.done();
         assert_eq!(
             program.layout(msg).words,
-            vec![Repr::Int, Repr::Ref, Repr::Int]
+            vec![Repr::Tag, Repr::Ref, Repr::Int]
         );
 
         let mut kept = Machine::new(&program, 2048);
@@ -8346,6 +8600,9 @@ pub(crate) mod tests {
         let caller = build.function(
             "main",
             &[],
+            // Slot 0 of the outermost frame: the first word a run's stack
+            // holds a frame in, whose address is not the null place (ADR 0120's
+            // guard word, `mem::STACK_GUARD`).
             &[Repr::Int, Repr::Addr, Repr::Unit],
             int,
             vec![
@@ -8793,6 +9050,7 @@ pub(crate) mod tests {
             Arc::clone(&entry.word_runs),
             Arc::clone(&entry.fixed_payload_words),
             Arc::clone(&entry.reflection),
+            Arc::clone(&entry.agree),
         );
 
         assert_eq!(
@@ -10373,13 +10631,17 @@ pub(crate) mod tests {
         let body = build.lambda(
             "body",
             &[],
-            &[Repr::Int, Repr::Int],
+            &[Repr::Tag, Repr::Int],
             answer,
             &[],
             vec![
                 // `Err(9)`: the case index, then the payload word the case
                 // was placed at.
-                Inst::Int { dst: 0, value: 1 },
+                Inst::Tag {
+                    dst: 0,
+                    layout: answer,
+                    case: cove_ir::CaseId(1),
+                },
                 Inst::Int { dst: 1, value: 9 },
                 Inst::Return { src: 0 },
             ],

@@ -601,6 +601,176 @@ impl Layout {
     }
 }
 
+/// What a field instruction may do with one payload word of a heap object:
+/// the machine's half of [ADR 0120]'s rule that a word is only ever read as
+/// what it was written as.
+///
+/// A `Repr::Ref` slot carries no layout, so which object a field instruction
+/// reaches is a run-time fact, and the instruction's own layout says only what
+/// it *expects* to find. This is what the object's header says is there. The
+/// two have to agree on which words are references — a word read as one that
+/// was written as an `Int` is an address nobody allocated, and one written over
+/// a reference loses an object the collector was tracing — and a word the
+/// machine keeps for itself is not the program's to write.
+///
+/// [ADR 0120]: ../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// A word of the value: read and written at its own kind, `true` for a
+    /// reference.
+    Value(bool),
+    /// A word the machine maintains and the program may read — a cell's lock
+    /// word, a box's layout id — but never write: a field store over one would
+    /// make the machine's own bookkeeping say something the object does not
+    /// hold, and a lock word a store set would be a cell held by a task that
+    /// does not exist, which a `lock` would wait on forever.
+    ReadOnly(bool),
+    /// A word no field instruction may touch at all: bytes are not words, and
+    /// an identity table's addresses are kept from the collector on purpose.
+    Sealed,
+}
+
+impl Access {
+    /// Whether a word of this access may be read, or with `store` written, as
+    /// a word of `repr`.
+    pub fn admits(self, repr: Repr, store: bool) -> bool {
+        // An address is a frame's: no heap word is ever one.
+        if repr == Repr::Addr {
+            return false;
+        }
+        match self {
+            Access::Value(is_ref) => is_ref == repr.is_ref(),
+            Access::ReadOnly(is_ref) => !store && is_ref == repr.is_ref(),
+            Access::Sealed => false,
+        }
+    }
+}
+
+impl Layout {
+    /// The access of every payload word of an object of this layout, when its
+    /// payload is fixed by the layout alone ([`Layout::fixed_payload_words`]);
+    /// `None` for a run, a string, a box or the free layout, whose payload the
+    /// header's length or contents decide.
+    pub fn fixed_access(&self, layouts: &[Layout]) -> Option<Vec<Access>> {
+        let value = |words: &[Repr]| -> Vec<Access> {
+            words
+                .iter()
+                .map(|repr| match repr {
+                    Repr::Addr => Access::Sealed,
+                    other => Access::Value(other.is_ref()),
+                })
+                .collect()
+        };
+        Some(match &self.shape {
+            Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => value(&self.words),
+            // A length and a store. The lowering builds an owner by storing
+            // both after the allocation (`lower::collections`), so neither is
+            // the machine's alone; what makes them safe to write is that every
+            // reader of an owner checks the store is its family's and the
+            // length inside it before it uses either.
+            Shape::Vector { .. } | Shape::ByteBuffer => {
+                vec![Access::Value(false), Access::Value(true)]
+            }
+            // The callee is stored by the lowering after the allocation, and
+            // read by `CallClosure` against the program and the captures.
+            Shape::Closure { captures, .. } => {
+                let mut held = vec![Access::Value(false)];
+                for capture in captures {
+                    held.extend(value(&layouts.get(capture.index())?.words));
+                }
+                held
+            }
+            Shape::Shared { value: inner } => {
+                let mut held = vec![Access::ReadOnly(false)];
+                held.extend(value(&layouts.get(inner.index())?.words));
+                held
+            }
+            Shape::Free
+            | Shape::Str
+            | Shape::Bytes
+            | Shape::Elements { .. }
+            | Shape::Members { .. }
+            | Shape::Entries { .. }
+            | Shape::Boxed
+            | Shape::IdentityTable => return None,
+        })
+    }
+}
+
+/// The words of one unit of a run of `shape`: an element's, or a map entry's
+/// key and then its value. `None` for anything that is not a run of units.
+pub fn unit_words(layouts: &[Layout], shape: &Shape) -> Option<Vec<Repr>> {
+    match shape {
+        Shape::Elements { elem, .. } | Shape::Members { elem } => {
+            Some(layouts.get(elem.index())?.words.clone())
+        }
+        Shape::Entries { key, value } => {
+            let mut words = layouts.get(key.index())?.words.clone();
+            words.extend_from_slice(&layouts.get(value.index())?.words);
+            Some(words)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a field instruction naming `field` at payload word `at` may read
+/// (or, with `store`, write) an object whose header names `object`, when that
+/// object's payload is fixed: inside the payload, and every word admitting the
+/// word the field's layout puts there. `false` for an object whose payload is
+/// not fixed, which only the machine, holding the header, can answer for.
+pub fn field_agrees(
+    layouts: &[Layout],
+    object: LayoutId,
+    at: u32,
+    field: LayoutId,
+    store: bool,
+) -> bool {
+    let (Some(object), Some(field)) = (layouts.get(object.index()), layouts.get(field.index()))
+    else {
+        return false;
+    };
+    let Some(access) = object.fixed_access(layouts) else {
+        return false;
+    };
+    admits_field(&access, at, &field.words, store)
+}
+
+/// [`field_agrees`] over an object's [`Layout::fixed_access`] already in hand:
+/// the words `words` at payload word `at` are inside it and each admitted.
+pub fn admits_field(access: &[Access], at: u32, words: &[Repr], store: bool) -> bool {
+    let at = at as usize;
+    let Some(held) = access.get(at..at.saturating_add(words.len())) else {
+        return false;
+    };
+    held.len() == words.len()
+        && held
+            .iter()
+            .zip(words)
+            .all(|(access, repr)| access.admits(*repr, store))
+}
+
+/// [`unit_agrees`] over a run's [`unit_words`] already in hand.
+pub fn admits_unit(unit: &[Repr], words: &[Repr]) -> bool {
+    unit.len() == words.len()
+        && unit.iter().zip(words).all(|(held, want)| {
+            *want != Repr::Addr && *held != Repr::Addr && held.is_ref() == want.is_ref()
+        })
+}
+
+/// Whether an element instruction naming `unit` may read or write the units
+/// of an object whose header names `object`: the object is a run, and its unit
+/// is `unit`'s width with a reference exactly where `unit` has one.
+pub fn unit_agrees(layouts: &[Layout], object: LayoutId, unit: LayoutId) -> bool {
+    let (Some(object), Some(unit)) = (layouts.get(object.index()), layouts.get(unit.index()))
+    else {
+        return false;
+    };
+    let Some(words) = unit_words(layouts, &object.shape) else {
+        return false;
+    };
+    admits_unit(&words, &unit.words)
+}
+
 /// Whether a value of `unit` is, word for word, one entry of a
 /// [`Shape::Entries`] of `key` and `value`: a two-field struct whose first
 /// field is a `key` at word 0, whose second is a `value` at the key's width,

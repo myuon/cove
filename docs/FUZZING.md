@@ -31,9 +31,11 @@ records the differential targets' rules ([below](#the-differential-targets)).
 | `compile` | UTF-8 source | parse, standard-library attach, name resolution, type and uniqueness checking, lowering to IR, IR verification |
 | `run` | UTF-8 source | `compile`, then a run on the encoded VM and a run on the native tier |
 | `structured` | choices for the generator | a generated well-typed program through `compile` and both runs |
-| `image` | the body of a lowered-IR image | `cove_ir::serial::decode`, with a valid header supplied, then `cove_ir::verify` over what decodes (not run) |
+| `image` | the body of a lowered-IR image | `cove_ir::serial::decode`, with a valid header supplied, then `cove_ir::verify` over what decodes, and every mode's run of what verifies ([below](#the-vm-level-targets)) |
 | `differential` | choices for the generator | a generated well-typed program run in six modes, every pair compared |
 | `differential_source` | UTF-8 source | `compile`, then the same six runs and the same comparison |
+| `ir` | choices for the IR generator | a `cove_ir::Program` built by `src/irgen.rs`, `verify`, and every mode's run of it if it verifies ([below](#the-vm-level-targets)) |
+| `ir_mutate` | an image body and edits | a lowered program decoded from the body, edited by `src/mutate.rs`, then as `ir` |
 
 Input that is not UTF-8 returns at once from the three source targets. Every
 way a source reaches the front end is already a `String`, so such bytes are
@@ -205,6 +207,97 @@ and it is not a safety guarantee.** A miscompiled access that happens to read
 the right value, or a corruption no later operation reads, is invisible to it
 as it is to ASan.
 
+## The VM-level targets
+
+`ir`, `ir_mutate` and, since
+[ADR 0120](adr/0120-the-vm-runs-only-what-verifies.md), `image` hand the
+machine a `cove_ir::Program` with no front end in front of it. The source
+targets can only reach programs the lowering writes. These reach the rest,
+which is what the machine's contract is about: **for every program, either it
+is refused before its first instruction, or a run of it ends in `Ok` or
+`Err(RuntimeError)`** — no panic, no abort, no hang past the deadline, no
+undefined behaviour.
+
+- `ir` builds a program from the input with `crates/cove-fuzz/src/irgen.rs`.
+  It chooses by `Repr` and layout, so that about half of what it writes
+  verifies and the rest probes the verifier: 473 of 1,000 fixed inputs
+  verified on 2026-10-25, and every one of the 87 instruction kinds the
+  generator knows appeared in a program that verified.
+- `ir_mutate` reads an image body from the front of the input and applies the
+  edits in the bytes after it (`crates/cove-fuzz/src/mutate.rs`): an operand,
+  a layout, an id or a jump target changed. Its seeds are every program in
+  the repository, so what it edits is what the lowering writes.
+- `image` decodes a body, verifies it, and runs what verifies the way `ir`
+  does.
+
+A program that verifies is run in every mode — `vm`, `vm-again`, `vm-gc`,
+`native` and `native-gc` where the host has the tier, and `image` — with
+plausible arguments for the entry's parameters, under a 25 ms deadline
+(`ir::IR_DEADLINE`): a generated body jumps backwards as readily as forwards,
+and many of them loop until they are stopped. The modes are held to
+[ADR 0113](adr/0113-differential-fuzzing-compares-six-modes-and-a-stopped-run-by-its-prefix.md)'s
+agreement. A program `verify` refuses must be refused by the machine as
+well, with the verifier's sentence, and not run.
+
+Replaying and inspecting, without cargo-fuzz:
+
+```console
+$ cargo build --profile checked -p cove-fuzz
+$ ./target/checked/cove-fuzz ir-show <input>          # the listing, the entry and every mode's run
+$ ./target/checked/cove-fuzz ir-mutate-show <input>
+$ ./target/checked/cove-fuzz image-show <input>
+$ ./target/checked/cove-fuzz ir-stats 1000             # how the generator does over fixed inputs
+$ ./target/checked/cove-fuzz ir-seed 511 out           # the input `ir-stats` made for one seed
+```
+
+`ir-stats` is the measure of the generator. It reports the share that
+verifies, how the verified runs ended, the most common refusals, which
+instruction kinds never appeared in a verified program, and every finding
+with its seed. It also stops on a program that runs past 20 seconds, which is
+how the `verify` hang below was found.
+
+### What they found
+
+Reading the verifier against the machine, and then running these targets,
+found the gaps ADR 0120 records. Each has a regression input under
+`fuzz/regressions/image/` or `fuzz/regressions/ir/`, and the `image` ones are
+built by `crates/cove-fuzz/tests/vm_findings.rs`:
+
+- a field read as a family its object does not hold (a `String`'s text read
+  as an object address);
+- `lock` on an object that is not a cell;
+- a closure called with arguments that are not its function's parameters;
+- a dynamic view forged from two `Int`s and a reference;
+- a layout whose words disagree with its fields;
+- the address of an `Int` slot loaded through as a reference;
+- `verify` itself running for minutes on a place offset round a loop
+  (`ir-stats` seed 91);
+- `vm` and `vm-again` disagreeing over a forged view followed into
+  heap-dependent words (`ir-stats` seed 511).
+
+The ASan sessions that found the last four, on 2026-10-25, on an x86-64 Mac
+running under Rosetta, with `-fork` over 16 cores shared between the targets
+(so read the rates as a floor):
+
+| Target | session | inputs | crashes, timeouts | what it found |
+|---|---|---|---|---|
+| `ir` | 124 inputs, then stopped | 124 | 1 crash | `await` at another width than the task answers |
+| `ir` | 1,218 s, `-fork=6` | 295,704 | none | |
+| `image` | 602 inputs, then stopped | 602 | 1 crash | a span naming a file the image does not hold |
+| `image` | 1,241 s, `-fork=4` | 298,871 | 1 timeout | the backward switch edge |
+| `image` | 1,197 s, `-fork=6` | 303,496 | none | |
+| `ir_mutate` | 446 s, then stopped | 335,604 | 1 crash | the same span |
+| `ir_mutate` | 1,207 s, `-fork=5` | 442,262 | 9 timeouts | a backward switch edge compiled with no poll |
+| `ir_mutate` | 1,209 s, `-fork=7` | 448,583 | none | |
+
+A session with `-fork` stops at its first crash unless it is passed
+`-ignore_crashes=1`, which is what the later sessions were given; each crash
+and timeout is replayed and fixed before the next. A timeout is replayed alone
+before it is believed: on a machine running three sessions and a build, an
+input that takes a second can take ten, and only one that reproduces alone
+is a finding. One of the nine was replayed alone under ASan and took twelve
+seconds; after the fix all nine end at the deadline in every mode.
+
 ## What counts as a bug
 
 A harness discards every answer the toolchain is allowed to give:
@@ -238,7 +331,10 @@ A **finding** is anything else:
   checker bug;
 - in `differential` and `differential_source`, two modes that disagree under
   [the rules above](#what-is-compared). That panics with the program and every
-  mode's observation.
+  mode's observation;
+- in `ir`, `ir_mutate` and `image`, a run of a verified program that ends
+  any other way than `Ok` or `Err`, two modes that disagree, or a program
+  `verify` refuses that the machine runs anyway.
 
 **An infinite loop is not a bug.** A guest may loop forever; the deadline
 stops it after 150 ms and the run answers `Err`. libFuzzer's timeout is ten
@@ -266,9 +362,9 @@ The fuzzer, per session (`scripts/fuzz.sh`):
 | `-timeout` | 10 s | an order of magnitude over six runs' deadlines and a front end under ASan |
 | `-rss_limit_mb` | 4096 | ASan's shadow and quarantine are most of a session's 500–800 MB |
 | `-malloc_limit_mb` | 1024 | one huge host-side allocation is reported where it is made |
-| `-max_len` | 64 KiB source, 4 KiB generator choices, 256 KiB image | the largest program in the tree fits |
+| `-max_len` | 64 KiB source, 4 KiB generator choices (`ir` included), 256 KiB image (`ir_mutate` included) | the largest program in the tree fits |
 | `-dict` | `fuzz/dictionaries/cove.dict` | source targets only |
-| `-len_control=0` | `structured` and `differential` | their choices are read from the front; a short input is a short program |
+| `-len_control=0` | `structured`, `differential` and `ir` | their choices are read from the front; a short input is a short program |
 | leaks | on | LeakSanitizer's per-input check names the input that leaked, and its check at exit catches the rest; there is no suppression file, because nothing the process keeps on purpose is reported |
 
 Nothing in a run depends on the wall clock except the deadline, and that can
@@ -496,12 +592,10 @@ What would close those gaps, and whether it is worth it:
 - **The playground's C ABI** (`crates/cove-wasm/src/abi.rs`). Its input is a
   pointer and a length from JavaScript; fuzzing it means fuzzing a wasm
   module, not this process.
-- **Running decoded images.** The `image` target decodes and verifies what
-  it decoded and does not run it. `verify` refuses a program whose ids are out
-  of range (ADR 0117), but it checks well-formedness as the lowering
-  establishes it, not that the VM and the code generator are safe on every
-  program it accepts, and nobody claims that. ADR 0112 §5, in part superseded
-  by ADR 0117.
+- **A proof.** Since ADR 0120 a decoded image that verifies is run, and the
+  machine's contract covers every program `verify` accepts. That claim is
+  fuzzed by `ir`, `ir_mutate` and `image`, not proved: a gap the generator
+  and the mutator cannot reach would still be a gap.
 - **Multi-module packages, `cove test`, `cove fmt`.** The source targets
   compile one file as one module. covefmt is a Cove program the `run` corpus
   already includes.

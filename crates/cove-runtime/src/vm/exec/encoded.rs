@@ -108,8 +108,9 @@ use crate::vm::mem::{header_layout, header_len, Overflow};
 use crate::vm::report::{Decline, Outcome};
 
 use super::{
-    compare, dynamic, float_arith, int_arith, native, null_object, overflowed, reentrant_lock,
-    runs, wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry, SAFEPOINT_STRIDE,
+    compare, dynamic, float_arith, int_arith, native, not_a_cell, not_held, null_object,
+    overflowed, reentrant_lock, runs, wrong_arity, ChildState, Frame, Live, Machine, ScopeEntry,
+    SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -507,6 +508,22 @@ pub(crate) fn prepare(program: &Program) -> Result<Arc<Encoded>, RuntimeError> {
         }
     }
     Ok(Arc::new(encoded))
+}
+
+/// What a program `cove_ir::verify` refused is refused with, before it is
+/// encoded: the first fault, as the verifier words it.
+///
+/// [ADR 0120](../../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md):
+/// the machine's boundary is the verifier, so a `Program` that was not made by
+/// the lowering — read back from an image, or built by hand — is held to the
+/// same check the lowering holds its own output to, once per program.
+pub(crate) fn unverified(faults: &[cove_ir::Invalid]) -> RuntimeError {
+    let first = faults
+        .first()
+        .map_or_else(|| "it is not well formed".to_string(), ToString::to_string);
+    RuntimeError::new(format!("this program does not verify: {first}")).with_rule(
+        "The machine runs only a program `cove_ir::verify` accepts, however the program was made.",
+    )
 }
 
 /// What an opcode this loop does not run is refused with.
@@ -1539,7 +1556,7 @@ fn fused_window(
     let addr = machine.mem.word_at(base_at + held.b() as usize);
     let field = held.lo();
     let width = machine.width(LayoutId(held.hi()));
-    if let Err(error) = machine.checked(addr, field, width) {
+    if let Err(error) = machine.field(addr, field, LayoutId(held.hi()), false) {
         machine.sync(head);
         return Err(error.at(machine.span(id, head)));
     }
@@ -1733,6 +1750,17 @@ fn fused_push(
             }
             return Ok(0);
         }
+    } else if !matches!(
+        program.layout(header_layout(store_header)).shape,
+        Shape::Elements { elem, growable: true } if elem.0 == ensure.lo()
+    ) {
+        // An owner's store word is a field the lowering stores, so it is the
+        // element run only if its header says so (ADR 0120): anything else is
+        // left to the rows, whose ensure refuses it.
+        if machine.counting.is_some() {
+            machine.count_window(first.opcode(), Outcome::Declined(Decline::Store));
+        }
+        return Ok(0);
     }
 
     // The rows before the ensure: the head's length read — an owner of either
@@ -2603,19 +2631,23 @@ fn fused_tail(
                 let addr = machine.mem.word_at(base_at + held.b() as usize);
                 let field = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
-                machine.checked(addr, field, width).map(|()| {
-                    let from = machine.mem.payload_addr(addr, field);
-                    machine.mem.copy_words(base + held.a() as u64, from, width);
-                })
+                machine
+                    .field(addr, field, LayoutId(held.hi()), false)
+                    .map(|()| {
+                        let from = machine.mem.payload_addr(addr, field);
+                        machine.mem.copy_words(base + held.a() as u64, from, width);
+                    })
             }
             STORE_ELEM => {
                 let addr = machine.mem.word_at(base_at + held.a() as usize);
                 let index = machine.mem.word_at(base_at + held.b() as usize) as i64;
                 let width = machine.width(LayoutId(held.lo()));
-                machine.element(addr, index, width).map(|offset| {
-                    let into = machine.mem.payload_addr(addr, offset);
-                    machine.mem.copy_words(into, base + held.c() as u64, width);
-                })
+                machine
+                    .unit(addr, index, LayoutId(held.lo()), true)
+                    .map(|offset| {
+                        let into = machine.mem.payload_addr(addr, offset);
+                        machine.mem.copy_words(into, base + held.c() as u64, width);
+                    })
             }
             // A copy words its own refusals and gives them their span.
             RUN_COPY_BYTES => {
@@ -3398,7 +3430,7 @@ pub(super) fn dispatch<'s, 'a>(
             CALL_CLOSURE => {
                 let dst = a!();
                 let object = machine.mem.word_at(base_at + (b!() as usize));
-                let callee = match machine.callee_of(object) {
+                let callee = match machine.closure_callee(object, id, pc - 1) {
                     Ok(callee) => callee,
                     Err(error) => fail!(error),
                 };
@@ -3508,7 +3540,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let at = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
-                match machine.checked(addr, at, width) {
+                match machine.field(addr, at, LayoutId(held.hi()), false) {
                     Ok(()) => machine.mem.copy_words(
                         base + held.a() as u64,
                         machine.mem.payload_addr(addr, at),
@@ -3521,7 +3553,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (a!() as usize));
                 let at = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
-                match machine.checked(addr, at, width) {
+                match machine.field(addr, at, LayoutId(held.hi()), true) {
                     Ok(()) => machine.mem.copy_words(
                         machine.mem.payload_addr(addr, at),
                         base + held.b() as u64,
@@ -3536,7 +3568,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let index = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let width = machine.width(LayoutId(held.lo()));
-                match machine.element(addr, index, width) {
+                match machine.unit(addr, index, LayoutId(held.lo()), false) {
                     Ok(at) => machine.mem.copy_words(
                         base + held.a() as u64,
                         machine.mem.payload_addr(addr, at),
@@ -3549,7 +3581,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (a!() as usize));
                 let index = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 let width = machine.width(LayoutId(held.lo()));
-                match machine.element(addr, index, width) {
+                match machine.unit(addr, index, LayoutId(held.lo()), true) {
                     Ok(at) => machine.mem.copy_words(
                         machine.mem.payload_addr(addr, at),
                         base + held.c() as u64,
@@ -3567,6 +3599,12 @@ pub(super) fn dispatch<'s, 'a>(
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());
+                }
+                // A header's length counts bytes only in a byte run; read as
+                // bytes, anything else is read past (ADR 0120).
+                if !machine.is_byte_run(addr) {
+                    machine.sync(pc - 1);
+                    fail!(machine.not_bytes(machine.mem.object_layout(addr)));
                 }
                 let at = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let len = machine.mem.object_len(addr) as i64;
@@ -3751,7 +3789,7 @@ pub(super) fn dispatch<'s, 'a>(
             ADDR_OF_FIELD => {
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let at = held.lo();
-                match machine.checked(addr, at, 1) {
+                match machine.addressable(addr, at, id, pc - 1) {
                     Ok(()) => {
                         let word = machine.mem.payload_addr(addr, at);
                         machine.mem.set_word_at(base_at + (a!()) as usize, word);
@@ -3762,19 +3800,43 @@ pub(super) fn dispatch<'s, 'a>(
             // Arithmetic and nothing else: what an address names is a value
             // location, and a value location's parts are at static offsets
             // from its first word.
+            //
+            // A null address is a slot no place was formed into — a frame is
+            // zeroed on entry — and word 0 is a stack word, so it is refused
+            // rather than followed (ADR 0120). Every other address names a
+            // place `cove_ir::verify` held to what is done through it.
             ADDR_OF_PART => {
                 let word = machine.mem.word_at(base_at + (b!() as usize));
+                if word == 0 {
+                    fail!(null_object());
+                }
                 machine
                     .mem
                     .set_word_at(base_at + (a!()) as usize, word + held.lo() as u64);
             }
             LOAD => {
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
+                if addr == 0 {
+                    fail!(null_object());
+                }
+                if machine.loads_a_place(id, pc - 1) {
+                    if let Err(error) = machine.frame_place(addr, LayoutId(held.lo())) {
+                        fail!(error);
+                    }
+                }
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(base + held.a() as u64, addr, width);
             }
             STORE => {
                 let addr = machine.mem.word_at(base_at + (a!() as usize));
+                if addr == 0 {
+                    fail!(null_object());
+                }
+                if machine.loads_a_place(id, pc - 1) {
+                    if let Err(error) = machine.frame_place(addr, LayoutId(held.lo())) {
+                        fail!(error);
+                    }
+                }
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(addr, base + held.b() as u64, width);
             }
@@ -3996,6 +4058,9 @@ pub(super) fn dispatch<'s, 'a>(
                 if addr == 0 {
                     fail!(null_object());
                 }
+                if !machine.is_cell(addr) {
+                    fail!(not_a_cell());
+                }
                 machine.sync(pc - 1);
                 let taken = {
                     let live = Live(machine);
@@ -4011,12 +4076,14 @@ pub(super) fn dispatch<'s, 'a>(
                 if addr == 0 {
                     fail!(null_object());
                 }
+                // The innermost cell this task holds, and no other: a lowered
+                // `lock` leaves its regions in the order it entered them, and
+                // an `unlock` of anything else would give back a cell another
+                // task is inside, or one nobody is.
+                if machine.held.last().copied() != Some(addr) {
+                    fail!(not_held());
+                }
                 cell::unlock(&machine.mem, addr, machine.cell_tag);
-                debug_assert_eq!(
-                    machine.held.last().copied(),
-                    Some(addr),
-                    "a lock region is left in the order it was entered"
-                );
                 machine.held.pop();
             }
 
@@ -8990,7 +9057,12 @@ mod tests {
                 cove_ir::verify(&program).is_err(),
                 "the static rule refuses a commit with no window"
             );
-            let mut machine = Machine::new(&program, 1 << 16);
+            // And so does the machine, before it runs a thing (ADR 0120)...
+            let mut refusing = Machine::new(&program, 1 << 16);
+            assert!(message(refusing.run(alloc, &[0], &budget())).contains("does not verify"));
+            // ...so the run-time check behind the rule is reached only by a
+            // machine that was not told to ask.
+            let mut machine = Machine::unverified(&program, 1 << 16);
             let buffer = machine.run(alloc, &[0], &budget()).unwrap()[0];
             let capacity = u64::from(
                 machine

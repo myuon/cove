@@ -7,7 +7,7 @@ name: Fuzz
 # input that crashes at once, and a long run on a schedule, which is where
 # findings come from. CI's main job is already the expensive one; this
 # workflow is kept out of it so a pull request's ordinary gate is not slowed
-# by it, and the smoke is seven short parallel jobs rather than one long one.
+# by it, and the smoke is nine short parallel jobs rather than one long one.
 
 on:
   pull_request:
@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse, compile, run, structured, image, differential, differential_source]
+        target: [parse, compile, run, structured, image, differential, differential_source, ir, ir_mutate]
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +68,7 @@ jobs:
           cargo fuzz --version
 
       # One cache per target, because each job links only its own binary and
-      # the seven would otherwise race to save the same key. The key ends in
+      # the nine would otherwise race to save the same key. The key ends in
       # the run id for ci.yml's reason: a key that always misses always saves,
       # and `restore-keys` takes the newest.
       - name: Cache cargo and the fuzz build

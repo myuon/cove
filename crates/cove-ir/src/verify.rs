@@ -36,6 +36,8 @@
 //! at collection time.
 
 mod indices;
+mod layouts;
+pub mod places;
 
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
 use crate::layout::{LayoutId, Shape};
@@ -75,6 +77,12 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
     if !faults.is_empty() {
         return Err(faults);
     }
+    // Then that every layout means what its words say, before any check reads
+    // a layout's words as the truth about its shape.
+    faults = layouts::check(program);
+    if !faults.is_empty() {
+        return Err(faults);
+    }
     for (index, function) in program.functions.iter().enumerate() {
         Check {
             program,
@@ -85,6 +93,12 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
             faults: &mut faults,
         }
         .run();
+    }
+    // And last, across functions, where every address goes and what it is
+    // used as: a question about the whole call graph, asked of a program
+    // whose every instruction is already known to be well formed.
+    if faults.is_empty() {
+        faults = places::check(program);
     }
     if faults.is_empty() {
         Ok(())
@@ -2690,48 +2704,52 @@ mod tests {
     use crate::program::{Arg, Function, HostOp, Local, Table, TableId};
     use crate::{ArgsId, HostOpId};
 
-    const INT: LayoutId = LayoutId(0);
-    const STR: LayoutId = LayoutId(1);
-    const POINT: LayoutId = LayoutId(2);
-    /// `[disc: Int, Ref]`, the shape an `Option<String>` has.
-    const ANSWER: LayoutId = LayoutId(3);
+    const INT: LayoutId = LayoutId(1);
+    const STR: LayoutId = LayoutId(2);
+    const POINT: LayoutId = LayoutId(3);
+    /// `[Tag, Ref]`, the shape an `Option<String>` has.
+    const ANSWER: LayoutId = LayoutId(4);
     /// A second two-`Int` struct: the same words as [`POINT`] and a different
     /// family, which is what an argument's layout is checked against.
-    const PAIR: LayoutId = LayoutId(4);
-    const BOXED: LayoutId = LayoutId(5);
+    const PAIR: LayoutId = LayoutId(5);
+    const BOXED: LayoutId = LayoutId(6);
     /// A closure over nothing, whose layout says its callee is `FunctionId(1)`
     /// — the second function [`program`] is given, in the tests that need
     /// one. See [`Check::check_closure_callee`].
-    const CLOSURE: LayoutId = LayoutId(6);
+    const CLOSURE: LayoutId = LayoutId(7);
     /// A two-case enum, for the checks a case index needs an enum to make.
-    const ENUM: LayoutId = LayoutId(7);
+    const ENUM: LayoutId = LayoutId(8);
     /// `Array<Int>`: what a word finish of `Int` elements relabels its store to.
-    const ARRAY_INT: LayoutId = LayoutId(8);
+    const ARRAY_INT: LayoutId = LayoutId(9);
     /// `Set<Int>`: what a keyed finish of `Int` elements relabels its store to.
-    const SET_INT: LayoutId = LayoutId(9);
+    const SET_INT: LayoutId = LayoutId(10);
     /// `MapEntry<Int, Int>`: a key at word 0 and a value at word 1.
-    const ENTRY_INT: LayoutId = LayoutId(10);
+    const ENTRY_INT: LayoutId = LayoutId(11);
     /// `Map<Int, Int>`, whose entry [`ENTRY_INT`] is.
-    const MAP_INT: LayoutId = LayoutId(11);
+    const MAP_INT: LayoutId = LayoutId(12);
     /// `()`, the answer of an intrinsic that answers nothing.
-    const UNIT: LayoutId = LayoutId(12);
+    const UNIT: LayoutId = LayoutId(13);
     /// ADR 0068's view: `[Int, Ref, Int]`, the program's `view_layout`.
-    const VIEW: LayoutId = LayoutId(13);
+    const VIEW: LayoutId = LayoutId(14);
     /// An address word, which a render path's first word is.
-    const ADDR: LayoutId = LayoutId(15);
+    const ADDR: LayoutId = LayoutId(16);
     /// ADR 0068's Phase 4b-ii render path: `[Addr, Int]`, the program's
     /// `render_path_layout`.
-    const PATH: LayoutId = LayoutId(16);
+    const PATH: LayoutId = LayoutId(17);
     /// Issue #514's F4: the table beneath an identity set, and the set, `[Ref,
     /// Bool]` — the program's `identity_table_layout` and
     /// `identity_set_layout`.
-    const TABLE: LayoutId = LayoutId(17);
-    const IDENTITY: LayoutId = LayoutId(18);
+    const TABLE: LayoutId = LayoutId(18);
+    const IDENTITY: LayoutId = LayoutId(19);
     /// A `Bool` word, which an identity set's second word is.
-    const BOOL: LayoutId = LayoutId(19);
+    /// The byte run and the byte buffer, at the end of the table.
+    const BYTES: LayoutId = LayoutId(21);
+    const BUFFER: LayoutId = LayoutId(22);
+    const BOOL: LayoutId = LayoutId(20);
 
     fn layouts() -> Vec<Layout> {
         vec![
+            Layout::free(),
             Layout::word("Int", Repr::Int),
             Layout::object("String", Shape::Str),
             Layout::inline(
@@ -2748,7 +2766,7 @@ mod tests {
                     cases: Vec::new(),
                     payload: vec![Repr::Ref],
                 },
-                vec![Repr::Int, Repr::Ref],
+                vec![Repr::Tag, Repr::Ref],
             ),
             Layout::inline(
                 "Pair",
@@ -2828,6 +2846,8 @@ mod tests {
             crate::dynamic::identity_table_layout(),
             crate::dynamic::identity_set_layout(TABLE, BOOL),
             Layout::word("Bool", Repr::Bool),
+            Layout::object("Bytes", Shape::Bytes),
+            Layout::object("ByteBuffer", Shape::ByteBuffer),
         ]
     }
 
@@ -2859,6 +2879,8 @@ mod tests {
             functions,
             layouts: layouts(),
             str_layout: STR,
+            bytes_layout: BYTES,
+            buffer_layout: BUFFER,
             boxed_layout: BOXED,
             view_layout: VIEW,
             render_path_layout: PATH,
@@ -3667,7 +3689,7 @@ mod tests {
     fn a_tag_cannot_be_added_to() {
         let f = function(
             vec![Repr::Int, Repr::Ref, Repr::Tag],
-            ANSWER,
+            INT,
             vec![
                 Inst::Arith {
                     num: Num::Int,
@@ -3694,7 +3716,7 @@ mod tests {
     fn a_tag_cannot_be_ordered_or_compared_as_an_integer() {
         let ordered = function(
             vec![Repr::Int, Repr::Ref, Repr::Tag, Repr::Bool],
-            ANSWER,
+            INT,
             vec![
                 Inst::Cmp {
                     on: Compare::Int,
@@ -3713,7 +3735,7 @@ mod tests {
 
         let equal = function(
             vec![Repr::Int, Repr::Ref, Repr::Tag, Repr::Bool],
-            ANSWER,
+            INT,
             vec![
                 Inst::Cmp {
                     on: Compare::Int,
@@ -3738,7 +3760,7 @@ mod tests {
     fn a_tag_is_written_and_dispatched_on() {
         let f = function(
             vec![Repr::Int, Repr::Ref, Repr::Tag],
-            ANSWER,
+            INT,
             vec![
                 Inst::Tag {
                     dst: 2,
@@ -3766,7 +3788,7 @@ mod tests {
     fn a_tag_naming_a_case_the_enum_does_not_have_is_a_fault() {
         let f = function(
             vec![Repr::Int, Repr::Ref, Repr::Tag],
-            ANSWER,
+            INT,
             vec![
                 Inst::Tag {
                     dst: 2,
@@ -3790,7 +3812,7 @@ mod tests {
         // which word this is.
         let f = function(
             vec![Repr::Int, Repr::Ref],
-            ANSWER,
+            INT,
             vec![
                 Inst::Switch {
                     on: 1,
@@ -4283,8 +4305,8 @@ mod tests {
     #[test]
     fn a_clear_agrees_with_the_layout_it_zeroes() {
         let f = function(
-            vec![Repr::Int, Repr::Ref, Repr::Unit],
-            INT,
+            vec![Repr::Tag, Repr::Ref, Repr::Unit],
+            ANSWER,
             vec![
                 Inst::Clear {
                     slot: 0,
@@ -4297,11 +4319,11 @@ mod tests {
                 Inst::Return { src: 0 },
             ],
         );
-        // The first is right — `[Int, Ref]` is what an `Option` is — and the
+        // The first is right — `[Tag, Ref]` is what an `Option` is — and the
         // second names the same layout one word along, where it is not.
         assert_eq!(
             faults(&program(vec![f])),
-            vec!["what a clear zeroes is `Option`, whose word 0 is int, but slot 1 holds ref"]
+            vec!["what a clear zeroes is `Option`, whose word 0 is tag, but slot 1 holds ref"]
         );
     }
 

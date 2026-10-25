@@ -170,6 +170,17 @@ impl OwnedVm {
         self.vm.invoke(module, name, args)
     }
 
+    /// [`Vm::invoke_lowered`]: every host call blocks. Runs on the calling
+    /// thread, which must keep [the stack promise](Vm#the-calling-threads-stack).
+    pub fn invoke_lowered(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        self.vm.invoke_lowered(module, name, args)
+    }
+
     /// [`Vm::invoke_within`]: every host call blocks. Runs on the calling
     /// thread, which must keep [the stack promise](Vm#the-calling-threads-stack).
     pub fn invoke_within(
