@@ -99,7 +99,13 @@ jobs:
       - name: Seed the corpus
         run: scripts/fuzz-seed-corpus.sh ${{ matrix.target }}
 
+      # The differential targets count what each input compared (issue 704,
+      # docs/FUZZING.md "What a session compared"): every process libFuzzer
+      # starts writes its counts to this directory as it goes. Empty for the
+      # other targets, which is the same as unset.
       - name: Fuzz
+        env:
+          COVE_FUZZ_STATS_DIR: ${{ startsWith(matrix.target, 'differential') && format('{0}/fuzz/stats/session', github.workspace) || '' }}
         run: |
           case "${{ github.event_name }}" in
             pull_request) seconds=60; extra=() ;;
@@ -108,6 +114,49 @@ jobs:
           esac
           echo "fuzzing ${{ matrix.target }} for ${seconds}s ${extra[*]}"
           scripts/fuzz.sh "${{ matrix.target }}" "$seconds" -- "${extra[@]}"
+
+      # What the session compared, and what its corpus compares: the session's
+      # files merged, and the corpus replayed once each by `cove-fuzz stats`,
+      # which counts a finding rather than stopping at it. Built on stable
+      # without ASan — a count is not a memory-safety question — into the
+      # cached `target/`. Whatever the fuzz step did, so a failing run still
+      # says what it had compared; and never failing the job itself, which is
+      # the fuzz step's to fail.
+      - name: Count what was compared
+        if: always() && startsWith(matrix.target, 'differential')
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          cargo build --profile checked -p cove-fuzz --features template
+          mkdir -p fuzz/stats/session
+          {
+            echo "## fuzz ${{ matrix.target }}: what was compared"
+            echo
+            echo "### This session (every execution, each \`-fork\` child counted)"
+            echo
+            echo '```'
+            ./target/checked/cove-fuzz stats merge fuzz/stats/session \
+              2>&1 > fuzz/stats/session.json || true
+            echo '```'
+            echo
+            echo "### The corpus, replayed once each"
+            echo
+            echo '```'
+            ./target/checked/cove-fuzz stats "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" \
+              2>&1 > fuzz/stats/corpus.json || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The counts are uploaded on every run, pass or fail, so a run that
+      # found nothing still says what it compared. Counts only: no input.
+      - name: Upload the counts
+        if: always() && startsWith(matrix.target, 'differential')
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-stats-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/stats
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Save the corpus
         if: always() && github.event_name != 'pull_request'

@@ -11,7 +11,7 @@ records the differential targets' rules ([below](#the-differential-targets)).
 
 | Path | What it is |
 |---|---|
-| `crates/cove-fuzz/` | Every harness, as a stable workspace library. `src/generate.rs` is the program generator; `src/differential.rs` runs one program in every mode and compares them. `src/bin/cove-fuzz.rs` replays inputs without cargo-fuzz. |
+| `crates/cove-fuzz/` | Every harness, as a stable workspace library. `src/generate.rs` is the program generator; `src/differential.rs` runs one program in every mode and compares them. `src/stats.rs` counts what the differential targets compared. `src/bin/cove-fuzz.rs` replays inputs without cargo-fuzz, and `cove-fuzz stats` counts a corpus. |
 | `crates/cove-fuzz/tests/regressions.rs` | Replays every committed input under `cargo t`, and holds the generator to its promise. |
 | `fuzz/` | The cargo-fuzz crate: one `fuzz_target!` per harness. Not a workspace member (nightly only). |
 | `fuzz/seeds/<target>/` | A few small starting inputs per target, committed. |
@@ -437,6 +437,129 @@ whole standard library again: about 15 ms an input without ASan, several times
 that with it. That is the front end's cost and not the harness's. `-fork=N`
 or `-jobs=N` is the way to spend more cores on it.
 
+## What a session compared
+
+A differential session that found nothing says as much as what it compared,
+and libFuzzer's own numbers — executions, coverage edges — do not say that. A
+program every mode stopped on before printing anything agrees trivially.
+So `differential` and `differential_source` classify every input, before
+they panic on it, and count ([issue #704](https://github.com/myuon/cove/issues/704);
+`crates/cove-fuzz/src/stats.rs` is the implementation and its module
+documentation the long form). The counts are kept apart — they overlap — and
+nothing here is a score.
+
+### The metrics
+
+| Key | Counts |
+|---|---|
+| `inputs`, `targets.<name>` | inputs, per target |
+| `stages.utf8` … `stages.ran` | how far through the front end inputs got, each stage counting the inputs that passed it: `utf8` (every `differential` input is), `parsed`, `checked`, `lowered`, `verified` (`cove_ir::verify` accepts the lowered program), `entry` (it has `playground.main` — the source targets' form of "the arguments were accepted", since `main` takes none), `ran` (every mode ran and was compared). A program that does not verify is still run, and every lowered mode refuses it alike, so `ran` may exceed `verified` |
+| `mismatches` | findings: two modes disagreed, the image did not read back, or (for `differential`) the front end refused a generated program. Nought in a passing session |
+| `crashes` | inputs `cove-fuzz stats` caught panicking anywhere else (a session reports those as crashes and does not get to count them) |
+| `comparisons.full` | programs whose every pair of modes was compared in full |
+| `comparisons.prefix` | programs with at least one pair compared **by prefix only** — one of the pair stopped in a way that belongs to its mode (the deadline, a heap of another size running out, a call-depth limit) |
+| `comparisons.no_entry` | programs with no `main`: every mode refuses them alike before their first instruction, so they are neither. `full + prefix + no_entry = ran` |
+| `comparisons.empty_prefix` | of `prefix`, programs whose **every** prefix-compared pair had an **empty common prefix**: a pair compared by prefix checks that the shorter of each console stream is a prefix of the longer, so what it compares is the shorter stdout and the shorter stderr, and its common prefix is empty when both are empty — it compared no output at all |
+| `comparisons.pairs_full`, `pairs_prefix`, `pairs_empty_prefix` | the same, counted in pairs of modes rather than programs |
+| `comparisons.{full,prefix}_with_native`, `…_with_gc_while_compiled` | the `full` or `prefix` programs that also count under the `programs` key of that name |
+| `programs.native_ran` | the `native` mode entered compiled code (`native_calls > 0`); without that, `native` compared the encoded VM with itself |
+| `programs.vm_gc_collected`, `native_gc_collected` | that mode collected at least once |
+| `programs.gc_while_compiled` | some mode collected **while a compiled frame was on the stack** — `OwnedVm::collections_while_compiled`, a runtime counter — which is what tests a compiled frame's roots. A run that collected and ran compiled code at different moments did not. `collections_while_compiled` is the number of such collections, summed |
+| `modes.<mode>` | per mode: `ran`; `ended.<outcome>` for runs that did not stop, by `RunOutcome` name (`success`; `error`, the entry returned `Err`; `invariant`, a trap; …); `stopped.<reason>`; `skipped.<reason>`; `entered_compiled_code`, `collected`, `collected_while_compiled` |
+
+The file is JSON: objects, with non-negative integers at the leaves; two files
+merge by adding leaf to leaf. The IR targets (`ir`, `ir_mutate`, `image`) are
+not counted yet; they can be, as new keys in the same tree.
+
+The runtime counter costs one add and one subtract each time Rust enters
+compiled code (`run_frame`, the one body every such entry goes through) and
+one comparison per collection; a call compiled code makes to compiled code
+directly pays nothing, and the dispatch loop is untouched.
+
+### Producing them
+
+**In a session.** Set `COVE_FUZZ_STATS_DIR`, and every process the target runs
+in writes `$COVE_FUZZ_STATS_DIR/<target>-<pid>.json` after its first input,
+every 256 inputs, at least every ten seconds, and before an input that is
+about to panic — by a temporary file and a rename, so a reader never sees half
+a file. It is written as it goes because libFuzzer does not promise to run
+anything at exit and kills a `-fork` child. Unset, nothing is counted and no
+file is touched.
+
+```console
+$ COVE_FUZZ_STATS_DIR=$PWD/fuzz/stats/session scripts/fuzz.sh differential 600 -- -fork=4
+$ cargo run --profile checked -p cove-fuzz --features template -- stats merge fuzz/stats/session > fuzz/stats/session.json
+```
+
+A session counts **executions**: libFuzzer runs its corpus first, and each
+`-fork` child runs part of it again, so an input is counted every time it runs.
+
+**Over a corpus.** `cove-fuzz stats <differential|differential_source> PATH...`
+replays every file under the paths once — directories recursively, `*.md` and
+dot-files left out — and counts it, a finding included, without stopping. It
+prints the JSON on stdout and the summary on stderr, lists each finding, and
+exits non-zero if there was one.
+
+```console
+$ cargo run --profile checked -p cove-fuzz --features template -- stats differential fuzz/corpus/differential > corpus.json
+```
+
+The summary leads with one sentence:
+
+```text
+N programs compared in full, M of them with native execution, K with a collection while compiled code was live; P prefix-only, Q of those with an empty common prefix (Q/P); … mismatches and … crashes over … inputs.
+```
+
+### What they say
+
+`--features template` matters on the command line above: `-p cove-fuzz` alone
+is not a workspace build, so without it nothing turns the native tier on, and
+`native` and `native-gc` are skipped.
+
+### What they say
+
+Measured 2026-10-25 on an x86-64 Mac, when the counts landed. Report these
+columns for a session from now on, beside the speed table's.
+
+| Run | inputs | full | of which native ran | of which a collection under a compiled frame | prefix-only | **of which empty prefix** | no entry | mismatches |
+|---|---|---|---|---|---|---|---|---|
+| `differential` session, `-s none -fork=4 -ignore_crashes=1`, 600 s | 15,178 executions | 12,781 | 12,595 | 2,108 | 2,397 | **2,009 (83.8%)** | 0 | 0 |
+| `differential`, 500 random inputs (seed 704, 64 B–4 KiB), `cove-fuzz stats` | 500 | 452 | 444 | 41 | 48 | **43 (89.6%)** | 0 | 0 |
+| `differential`, the 8 committed seeds and regressions | 8 | 8 | 8 | 4 | 0 | 0 | 0 | 0 |
+| `differential_source`, the seeded corpus (413 repository programs and seeds) | 413 (297 ran) | 193 | 155 | 27 | 55 | **30 (54.5%)** | 49 | 0 |
+| `differential_source`, the 3 committed seeds and regressions | 3 | 3 | 3 | 1 | 0 | 0 | 0 | 0 |
+
+(The repository corpus's 413 inputs: 4 do not parse, 105 do not check — a
+package's module read as one file meets an unresolved name — and 7 do not
+lower; 49 of the 297 that run have no `main`.)
+
+What the numbers say:
+
+- **A prefix-only comparison is almost always an empty one.** In the session,
+  13.2% of the programs (2,009 of 15,178) were compared only by prefix and the
+  prefix held nothing — 84.8% of the prefix-compared pairs (14,902 of 17,572)
+  compared no byte of output. Nearly all of them are `vm-gc` and `native-gc`
+  running out of their 2^11-word heap (2,370 of each), most before the first
+  line was printed: the standard library's literals take about 1,200 of those
+  words before the first instruction. Those programs were compared in full
+  between `vm-gc` and `native-gc`, which share the heap, and in full among the
+  other four; it is the small-heap pair against the rest that compared
+  nothing.
+- **Compiled frames' roots are tested, and mostly by `native-gc`.** 17.3% of
+  the session's programs (2,619) collected while a compiled frame was on the
+  stack, 25,479 such collections, against 19.9% (3,023) that collected at all
+  on the small heap — so most collections the small heap forces happen under
+  compiled code.
+- **The native tier ran in 97% of programs** (14,742), so `native` is not
+  comparing the encoded VM with itself.
+- In-session counts lag libFuzzer's: it reported about 16,100 executions, and
+  a `-fork` child killed between two writes loses what it counted since the
+  last one.
+- The first session, without `-ignore_crashes`, stopped 131 s in on a
+  generator bug (`fuzz/regressions/differential/generator-byte-range-nests-too-deep`),
+  which it had counted before the panic: one mismatch, one input refused by
+  the parser.
+
 ## Triage, minimise, keep
 
 1. **Reproduce.** `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-…`
@@ -504,6 +627,14 @@ slowed by it:
   seconds): each target for 25 minutes with `-fork=$(nproc)`. The corpus each
   target grew is saved in the Actions cache and restored the next night, so
   the nightly run accumulates.
+- **For the differential targets, on every run**, pass or fail: the session
+  runs with `COVE_FUZZ_STATS_DIR` set, and afterwards a stable, non-ASan
+  `cove-fuzz` merges the session's files and replays the job's corpus
+  ([What a session compared](#what-a-session-compared)). Both summaries go
+  into the job's step summary, and the JSON is uploaded as
+  `fuzz-stats-<target>-<run id>`, kept thirty days. It holds counts and
+  reasons only, never an input. The step does not fail the job; the fuzz
+  step does that.
 - **On a crash**, the input and the log are uploaded as an artifact with a
   seven-day retention. The workflow reads no secret and has `contents: read`
   only, so neither holds anything private. This repository is public, and so
