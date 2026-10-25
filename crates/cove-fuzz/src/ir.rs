@@ -198,13 +198,17 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
     }
 
     let native = PreparedProgram::new(Arc::clone(&program)).with_native();
-    let summary = native.as_ref().ok().and_then(PreparedProgram::native).map(|n| {
-        format!(
-            "compiled {} of {} reachable functions",
-            n.compiled(),
-            n.reachable()
-        )
-    });
+    let summary = native
+        .as_ref()
+        .ok()
+        .and_then(PreparedProgram::native)
+        .map(|n| {
+            format!(
+                "compiled {} of {} reachable functions",
+                n.compiled(),
+                n.reachable()
+            )
+        });
     let mut observed = Vec::new();
     let mut skipped = Vec::new();
     observed.push(machine_run(
@@ -478,7 +482,11 @@ pub fn stats(count: u64) -> String {
         let report = match std::panic::catch_unwind(move || run(subject)) {
             Ok(report) => report,
             Err(_) => {
-                let why = RAISED.lock().ok().and_then(|r| r.clone()).unwrap_or_default();
+                let why = RAISED
+                    .lock()
+                    .ok()
+                    .and_then(|r| r.clone())
+                    .unwrap_or_default();
                 findings.push(format!("panic at {why} (seed {seed})"));
                 continue;
             }
@@ -516,7 +524,10 @@ pub fn stats(count: u64) -> String {
             }
         }
         if let Some(why) = &report.runs.mismatch {
-            findings.push(format!("mismatch: {} (seed {seed})", why.lines().next().unwrap_or("")));
+            findings.push(format!(
+                "mismatch: {} (seed {seed})",
+                why.lines().next().unwrap_or("")
+            ));
         }
     }
     std::panic::set_hook(hook);

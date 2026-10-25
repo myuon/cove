@@ -82,8 +82,14 @@ fn main() -> ExitCode {
                     println!("no program: the input does not read");
                     continue;
                 };
-                println!("--- program ---\n{}", cove_fuzz::ir::listing(&subject.program));
-                println!("--- entry ---\n{}.{}{:?}", subject.module, subject.name, subject.args);
+                println!(
+                    "--- program ---\n{}",
+                    cove_fuzz::ir::listing(&subject.program)
+                );
+                println!(
+                    "--- entry ---\n{}.{}{:?}",
+                    subject.module, subject.name, subject.args
+                );
                 let report = cove_fuzz::ir::run(subject);
                 println!("--- runs ---\n{}", report.describe());
                 found |= report.is_finding();

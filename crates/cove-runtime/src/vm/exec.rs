@@ -3285,10 +3285,7 @@ impl<'a> Machine<'a> {
     pub(crate) fn is_byte_run(&self, addr: u64) -> bool {
         let layout = self.mem.object_layout(addr);
         layout == self.program.str_layout
-            || matches!(
-                self.program.layout(layout).shape,
-                Shape::Str | Shape::Bytes
-            )
+            || matches!(self.program.layout(layout).shape, Shape::Str | Shape::Bytes)
     }
 
     /// The refusal of a byte read from an object of `layout`, which holds none.

@@ -171,9 +171,11 @@ pub(super) fn check(program: &Program) -> Vec<Invalid> {
             *s == Shape::ByteBuffer
         }),
         ("boxed_layout", program.boxed_layout, |s| *s == Shape::Boxed),
-        ("identity_table_layout", program.identity_table_layout, |s| {
-            *s == Shape::IdentityTable
-        }),
+        (
+            "identity_table_layout",
+            program.identity_table_layout,
+            |s| *s == Shape::IdentityTable,
+        ),
     ];
     // A program with no layouts at all is a fixture with nothing to allocate,
     // and `indices` has already let it through on those terms.

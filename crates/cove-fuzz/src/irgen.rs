@@ -42,9 +42,8 @@ use arbitrary::Unstructured;
 use cove_diag::{FileId, SourceMap, Span};
 use cove_ir::{
     enum_layout, struct_layout, Arg as IrArg, ArgsId, ArithOp, BitOp, Capture, CaseId, CmpOp,
-    Compare, Convert, Function, FunctionId, HostOp, HostOpId, Inst, Layout, LayoutId, Len,
-    MinMax, Num, Program, RefMap, Repr, Shape, ShiftOp, Slot, Storage, StrId, Table, TableId,
-    Validation,
+    Compare, Convert, Function, FunctionId, HostOp, HostOpId, Inst, Layout, LayoutId, Len, MinMax,
+    Num, Program, RefMap, Repr, Shape, ShiftOp, Slot, Storage, StrId, Table, TableId, Validation,
 };
 
 use crate::ir::{Arg, Subject};
@@ -121,7 +120,10 @@ pub fn base_layouts() -> Vec<Layout> {
     layouts.push(Layout::word("fn", Repr::Ref));
     layouts.push(enum_shape(
         "Result",
-        &[(Arc::from("Ok"), vec![UNIT]), (Arc::from("Err"), vec![ERROR])],
+        &[
+            (Arc::from("Ok"), vec![UNIT]),
+            (Arc::from("Err"), vec![ERROR]),
+        ],
         &layouts,
     ));
     layouts.push(enum_shape(
@@ -548,8 +550,26 @@ impl<'a> Gen<'a> {
             host_ops: Vec::new(),
             sigs: Vec::new(),
             values: vec![
-                UNIT, BOOL, INT, FLOAT, DURATION, STR, REF, HOST, BOXED, TASK, SCOPE, TAG, BYTES,
-                BYTE_BUFFER, VIEW, ERROR, FN_VALUE, RESULT_UNIT, OPTION_INT, ARRAY_STR,
+                UNIT,
+                BOOL,
+                INT,
+                FLOAT,
+                DURATION,
+                STR,
+                REF,
+                HOST,
+                BOXED,
+                TASK,
+                SCOPE,
+                TAG,
+                BYTES,
+                BYTE_BUFFER,
+                VIEW,
+                ERROR,
+                FN_VALUE,
+                RESULT_UNIT,
+                OPTION_INT,
+                ARRAY_STR,
             ],
             enums: vec![RESULT_UNIT, OPTION_INT],
             // Not `BOXED`: a box is allocated by `Box`, which knows what goes
@@ -721,7 +741,8 @@ impl<'a> Gen<'a> {
             self.objects.push(id);
         }
         // Scalars and the fixed-payload enums allocate as objects too.
-        self.objects.extend([INT, FLOAT, OPTION_INT, RESULT_UNIT, ERROR]);
+        self.objects
+            .extend([INT, FLOAT, OPTION_INT, RESULT_UNIT, ERROR]);
         for _ in 0..1 + self.below(4) {
             let elem = self.value_for_field();
             if !self.elements.contains(&elem) {
@@ -841,11 +862,7 @@ impl<'a> Gen<'a> {
 
     fn signature(&mut self, entry: bool) -> Sig {
         let mut params = Vec::new();
-        let count = if entry {
-            self.below(3)
-        } else {
-            self.below(4)
-        };
+        let count = if entry { self.below(3) } else { self.below(4) };
         for _ in 0..count {
             let layout = if entry {
                 self.pick(&[INT, INT, BOOL, FLOAT, STR, ARRAY_STR, DURATION])
@@ -1100,7 +1117,8 @@ impl<'g, 'a> Body<'g, 'a> {
     fn fresh(&mut self, layout: LayoutId) -> Slot {
         let at = self.reprs.len() as Slot;
         let words = self.g.words(layout);
-        self.reserved.extend(words.iter().map(|_| layout == IDENTITY_SET));
+        self.reserved
+            .extend(words.iter().map(|_| layout == IDENTITY_SET));
         self.reprs.extend(words);
         self.locs.push((at, layout));
         at
@@ -1197,7 +1215,14 @@ impl<'g, 'a> Body<'g, 'a> {
     }
 
     fn cmp_op(&mut self, ordered: bool) -> CmpOp {
-        let ops = [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge];
+        let ops = [
+            CmpOp::Eq,
+            CmpOp::Ne,
+            CmpOp::Lt,
+            CmpOp::Le,
+            CmpOp::Gt,
+            CmpOp::Ge,
+        ];
         if ordered && self.g.chance(1, 5) {
             return CmpOp::Order;
         }

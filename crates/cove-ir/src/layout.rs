@@ -761,7 +761,8 @@ pub fn admits_unit(unit: &[Repr], words: &[Repr]) -> bool {
 /// of an object whose header names `object`: the object is a run, and its unit
 /// is `unit`'s width with a reference exactly where `unit` has one.
 pub fn unit_agrees(layouts: &[Layout], object: LayoutId, unit: LayoutId) -> bool {
-    let (Some(object), Some(unit)) = (layouts.get(object.index()), layouts.get(unit.index())) else {
+    let (Some(object), Some(unit)) = (layouts.get(object.index()), layouts.get(unit.index()))
+    else {
         return false;
     };
     let Some(words) = unit_words(layouts, &object.shape) else {
