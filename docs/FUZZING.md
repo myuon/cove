@@ -687,6 +687,31 @@ overwritten before the read. The loops allocate strings of the held values'
 size for that reason, and the mutation experiment in
 [FUZZ_EVALUATION.md](FUZZ_EVALUATION.md) measures whether it is enough.
 
+## What it detects: artificial defects
+
+`fuzz/mutants/*.patch` are defects written into the runtime and the code
+generator on purpose, to measure whether the harness notices them — by the
+dedicated tests, by replaying an existing corpus, and by a new session —
+and `scripts/fuzz-mutant-experiment.sh <name>` is the experiment.
+[FUZZ_EVALUATION.md](FUZZ_EVALUATION.md), section 4, has the method and the
+results. A mutant is never applied to this tree: `scripts/fuzz-mutant.sh
+apply` makes a scratch worktree under `fuzz/measure/` and applies it there,
+and `scripts/fuzz-mutant.sh check`, a step of CI's main job, fails if a
+mutant's marker is anywhere in the tree under test or a patch no longer
+applies.
+
+```console
+$ scripts/fuzz-mutant.sh list
+$ scripts/fuzz-mutant.sh apply 002-native-int-mul-unchecked
+$ scripts/fuzz-mutant.sh run 002-native-int-mul-unchecked -- cargo test --profile checked -p cove-native --features template --test template
+$ scripts/fuzz-mutant.sh revert 002-native-int-mul-unchecked
+```
+
+An exploration's finding is replayed on the clean build before it is
+counted: one that fails there too is the toolchain's own, which is how
+[#720](https://github.com/myuon/cove/issues/720) and
+[#721](https://github.com/myuon/cove/issues/721) were found.
+
 ## Triage, minimise, keep
 
 1. **Reproduce.** `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-…`

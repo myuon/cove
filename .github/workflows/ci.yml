@@ -119,6 +119,12 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all --check
 
+      # The artificial defects of docs/FUZZ_EVALUATION.md are patches applied
+      # only in scratch worktrees. This fails if one is applied in the tree
+      # being tested, or if one no longer applies (and so measures nothing).
+      - name: no fuzzing mutant is applied, and every one still applies
+        run: scripts/fuzz-mutant.sh check
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --profile checked -- -D warnings
 
