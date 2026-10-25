@@ -1,0 +1,23 @@
+# 001-native-int-lt-is-le
+#
+# Native code answers `a < b` on `Int` (and `Bool`, tags) as `a <= b`.
+# Only the stored-answer form: a comparison fused with its branch is
+# emitted elsewhere and is untouched, so loops still end. Wrong only
+# when the two operands are equal.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -4388,7 +4388,8 @@
+         let cc = match op {
+             CmpOp::Eq => CC_E,
+             CmpOp::Ne => CC_NE,
+-            CmpOp::Lt => CC_L,
++            // COVE-MUTANT 001-native-int-lt-is-le
++            CmpOp::Lt => CC_LE,
+             CmpOp::Le => CC_LE,
+             CmpOp::Gt => CC_G,
+             CmpOp::Ge => CC_GE,

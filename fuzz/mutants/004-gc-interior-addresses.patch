@@ -1,0 +1,22 @@
+# 004-gc-interior-addresses
+#
+# A collection does not report a frame's addresses into heap objects
+# (ADR 0120's interior roots) as roots, on either tier. Wrong only when
+# such an address is the last thing keeping an object.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/exec.rs b/crates/cove-runtime/src/vm/exec.rs
+--- a/crates/cove-runtime/src/vm/exec.rs
++++ b/crates/cove-runtime/src/vm/exec.rs
+@@ -184,7 +184,8 @@
+             // An address into the heap keeps the object it is inside (ADR
+             // 0120): see `Space::containers`. A stack address, null included,
+             // names a frame, which is not collected.
+-            if let Some(addrs) = machine.agree.addrs.get(frame.function.index()) {
++            // COVE-MUTANT 004-gc-interior-addresses
++            if let Some(addrs) = machine.agree.addrs.get(usize::MAX) {
+                 for slot in addrs.iter() {
+                     let word = machine.mem.slot(frame.base, slot);
+                     if !mem::is_stack(word) {
