@@ -980,6 +980,24 @@ impl<'a> Vm<'a> {
         self.machine.collected().collections
     }
 
+    /// Of [`Vm::collections`], how many were made while compiled code was
+    /// running: with at least one native-tier frame on the stack, so that the
+    /// collection had to find that frame's references through the record
+    /// compiled code keeps.
+    ///
+    /// A run that both collected and called compiled code has not necessarily
+    /// done this — the two can happen at different moments — and this is the
+    /// number that tells them apart (issue #704). Always nought for a run with
+    /// no native tier. It is this machine's: a collection a spawned task's
+    /// machine made is counted by that machine.
+    ///
+    /// What it costs is one add and one subtract each time Rust enters
+    /// compiled code, and one comparison per collection; a call compiled code
+    /// makes to compiled code directly pays nothing.
+    pub fn collections_while_compiled(&self) -> u64 {
+        self.machine.collections_while_compiled()
+    }
+
     /// Words the most recent collection found alive, or `None` if the heap
     /// has never collected.
     ///

@@ -2257,7 +2257,13 @@ unsafe fn run_frame<const MASK: u64>(
     // Safety: the context is this call's, the frame at `index` is the callee's,
     // the destination is `into`'s width of words outside that frame, and the code
     // was emitted for exactly `Entry`'s shape.
+    // A compiled frame is live from here until `code` returns, and a
+    // collection made under it — from an allocating helper, or from the
+    // dispatch loop a compiled caller handed a call to — counts as one made
+    // with compiled frames standing. See `Machine::native_depth`.
+    (*machine).native_depth += 1;
     let outcome = code(&mut ctx, index, into_index, into.slot);
+    (*machine).native_depth -= 1;
 
     // The direct calls this entry's code opened without `open`, which is where
     // `open` would have counted them.
@@ -2792,6 +2798,13 @@ impl<'v, 'a> Session<'v, 'a> {
     /// would be claiming it had.
     pub fn collections(&self) -> u64 {
         self.machine.collected.collections
+    }
+
+    /// Of [`Session::collections`], those made while compiled code was
+    /// running — with at least one compiled frame on the stack. See
+    /// [`Vm::collections_while_compiled`](crate::Vm::collections_while_compiled).
+    pub fn collections_while_compiled(&self) -> u64 {
+        self.machine.collections_while_compiled()
     }
 
     /// How many objects this session's run has handed out, reuse counted each

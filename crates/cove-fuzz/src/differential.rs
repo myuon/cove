@@ -115,6 +115,7 @@ use cove_runtime::{
     PreparedProgram, Runtime, RuntimeError, Value, VirtualTime,
 };
 
+use crate::stats::{self, Classification};
 use crate::{front, limits, on_stack, Lowered, ENTRY, HEAP_WORDS, MODULE};
 
 /// The heap `vm-gc` and `native-gc` run over: 2^11 words, 16 KiB.
@@ -201,6 +202,11 @@ pub struct Observed {
     /// `native` means the native tier ran nothing of this program, and the
     /// comparison was of the encoded VM with itself. Never compared.
     pub native_calls: Option<u64>,
+    /// Of [`Observed::collections`], those made while a compiled frame was on
+    /// the stack ([`OwnedVm::collections_while_compiled`]): what says a run
+    /// tested a compiled frame's roots, rather than collecting and running
+    /// compiled code at different moments. Never compared.
+    pub collections_while_compiled: Option<u64>,
 }
 
 impl Observed {
@@ -215,6 +221,9 @@ impl Observed {
         }
         if let Some(n) = self.native_calls.filter(|&n| n > 0) {
             let _ = write!(out, " [{n} calls entered compiled code]");
+        }
+        if let Some(n) = self.collections_while_compiled.filter(|&n| n > 0) {
+            let _ = write!(out, " [{n} collections under a compiled frame]");
         }
         let _ = write!(out, "\n    answer: {}", self.answer.replace('\n', "\n    "));
         let _ = write!(
@@ -277,52 +286,101 @@ impl Report {
 /// [`generate::differential_from_bytes`](crate::generate::differential_from_bytes),
 /// runs it in every mode, and compares them.
 ///
+/// The input is counted in the session's statistics ([`crate::stats`])
+/// before anything panics, so a failing input is in the last file written.
+///
 /// # Panics
 ///
 /// If the program is refused by the front end, or if two modes disagree —
 /// with the program's text and every mode's observation.
 pub fn differential(data: &[u8]) {
-    let program = crate::generate::differential_from_bytes(data);
-    let source = program.clone();
-    let report = on_stack(move || match front(&source) {
-        Ok(lowered) => Ok(run_every_mode(lowered)),
-        Err(why) => Err(why),
-    });
-    match report {
-        Ok(report) => {
-            if let Some(why) = &report.mismatch {
-                panic!(
-                    "the modes disagree: {why}\n--- program ---\n{program}--- runs ---\n{}",
-                    report.describe()
-                );
-            }
-        }
-        Err(why) => panic!("a generated program was refused:\n{why}\n--- program ---\n{program}"),
+    let (classification, finding) = differential_classified(data);
+    stats::record(&classification, finding.is_some());
+    if let Some(why) = finding {
+        panic!("{why}");
     }
 }
+
+/// [`differential`] without the panic: the input's classification, and the
+/// message it would have panicked with if it is a finding. For
+/// [`differential`] itself and for `cove-fuzz stats`, which replays a corpus
+/// and counts its findings rather than stopping at the first.
+pub fn differential_classified(data: &[u8]) -> (Classification, Option<String>) {
+    let program = crate::generate::differential_from_bytes(data);
+    let source = program.clone();
+    let ran = on_stack(move || crate::front_staged(&source).map(run_lowered));
+    match ran {
+        Ok((report, front)) => {
+            let classification = stats::classify(TARGET, &report, front);
+            let finding = report.mismatch.as_ref().map(|why| {
+                format!(
+                    "the modes disagree: {why}\n--- program ---\n{program}--- runs ---\n{}",
+                    report.describe()
+                )
+            });
+            (classification, finding)
+        }
+        Err((stage, why)) => (
+            Classification::refused(TARGET, stage),
+            Some(format!(
+                "a generated program was refused:\n{why}\n--- program ---\n{program}"
+            )),
+        ),
+    }
+}
+
+const TARGET: &str = "differential";
+const SOURCE_TARGET: &str = "differential_source";
 
 /// [`differential`] over a source rather than over the generator's choices:
 /// what the `run` target is to `structured`. A source the front end refuses
 /// is not a finding.
 ///
+/// Counted in the session's statistics as [`differential`] is.
+///
 /// # Panics
 ///
 /// If two modes disagree, with the source and every mode's observation.
 pub fn differential_source(data: &[u8]) {
+    let (classification, finding) = differential_source_classified(data);
+    stats::record(&classification, finding.is_some());
+    if let Some(why) = finding {
+        panic!("{why}");
+    }
+}
+
+/// [`differential_source`] without the panic; see [`differential_classified`].
+pub fn differential_source_classified(data: &[u8]) -> (Classification, Option<String>) {
     let Ok(text) = std::str::from_utf8(data) else {
-        return;
+        return (Classification::not_utf8(SOURCE_TARGET), None);
     };
     let text = text.to_string();
     let source = text.clone();
-    let report = on_stack(move || front(&source).ok().map(run_every_mode));
-    if let Some(report) = report {
-        if let Some(why) = &report.mismatch {
-            panic!(
-                "the modes disagree: {why}\n--- program ---\n{text}\n--- runs ---\n{}",
-                report.describe()
-            );
+    let ran = on_stack(move || crate::front_staged(&source).map(run_lowered));
+    match ran {
+        Ok((report, front)) => {
+            let classification = stats::classify(SOURCE_TARGET, &report, front);
+            let finding = report.mismatch.as_ref().map(|why| {
+                format!(
+                    "the modes disagree: {why}\n--- program ---\n{text}\n--- runs ---\n{}",
+                    report.describe()
+                )
+            });
+            (classification, finding)
         }
+        Err((stage, _)) => (Classification::refused(SOURCE_TARGET, stage), None),
     }
+}
+
+/// [`run_every_mode`], with what the statistics need to know about the
+/// lowered program before it is run: whether `cove_ir::verify` accepts it,
+/// and whether it has the entry every mode is asked to run.
+fn run_lowered(lowered: Lowered) -> (Report, stats::Front) {
+    let front = stats::Front {
+        verified: cove_ir::verify(&lowered.program).is_ok(),
+        has_entry: lowered.program.function_named(MODULE, ENTRY).is_some(),
+    };
+    (run_every_mode(lowered), front)
 }
 
 /// Every mode's run of `source`, or the front end's refusal. For the
@@ -476,13 +534,7 @@ pub(crate) fn first_mismatch(observed: &[Observed]) -> Option<String> {
 /// How `a` and `b` disagree, if they do, under the rules the module
 /// documentation states.
 pub fn disagreement(a: &Observed, b: &Observed) -> Option<String> {
-    // Running out of memory is the mode's only when the two modes' heaps
-    // differ: `vm`, `native` and `image` share a capacity, as `vm-gc` and
-    // `native-gc` do, and one of a pair running out where the other did not
-    // is a leak or a lost collection, and compared in full.
-    let same_heap = a.mode.heap_words().is_some() && a.mode.heap_words() == b.mode.heap_words();
-    let stopped = |o: &Observed| o.stopped.filter(|&s| !(same_heap && s == OUT_OF_MEMORY));
-    let (a_stopped, b_stopped) = (stopped(a), stopped(b));
+    let (a_stopped, b_stopped) = stops_between(a, b);
     if a_stopped.is_some() || b_stopped.is_some() {
         for (stream, x, y) in [
             ("stdout", &a.stdout, &b.stdout),
@@ -521,6 +573,26 @@ pub fn disagreement(a: &Observed, b: &Observed) -> Option<String> {
     None
 }
 
+/// Whether `a` and `b` are compared only by their prefixes: whether either
+/// stopped in a way that belongs to its mode, as [`disagreement`] judges it.
+pub fn compared_by_prefix(a: &Observed, b: &Observed) -> bool {
+    let (a_stopped, b_stopped) = stops_between(a, b);
+    a_stopped.is_some() || b_stopped.is_some()
+}
+
+/// Each of `a` and `b`'s stop, if it is one that belongs to the mode *for this
+/// pair*.
+///
+/// Running out of memory is the mode's only when the two modes' heaps differ:
+/// `vm`, `native` and `image` share a capacity, as `vm-gc` and `native-gc` do,
+/// and one of a pair running out where the other did not is a leak or a lost
+/// collection, and compared in full.
+fn stops_between(a: &Observed, b: &Observed) -> (Option<&'static str>, Option<&'static str>) {
+    let same_heap = a.mode.heap_words().is_some() && a.mode.heap_words() == b.mode.heap_words();
+    let stopped = |o: &Observed| o.stopped.filter(|&s| !(same_heap && s == OUT_OF_MEMORY));
+    (stopped(a), stopped(b))
+}
+
 /// The hosts one run gets, and the buffers its console writes into.
 pub(crate) fn hosts(limits: cove_runtime::Limits) -> (HostRegistry, Buffer, Buffer) {
     let (out, err) = (Buffer::default(), Buffer::default());
@@ -550,10 +622,12 @@ fn lowered_run(
     let answer = vm.run_entry(MODULE, ENTRY, Vec::<Rc<str>>::new());
     let collections = vm.collections();
     let native_calls = vm.tiers().native();
+    let under_compiled = vm.collections_while_compiled();
     drop(vm);
     let mut observed = observe(mode, answer, &out, &err);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
+    observed.collections_while_compiled = Some(under_compiled);
     observed
 }
 
@@ -584,6 +658,7 @@ pub(crate) fn observe(
         stopped,
         collections: None,
         native_calls: None,
+        collections_while_compiled: None,
     }
 }
 
@@ -658,6 +733,7 @@ mod tests {
             stopped,
             collections: None,
             native_calls: None,
+            collections_while_compiled: None,
         }
     }
 

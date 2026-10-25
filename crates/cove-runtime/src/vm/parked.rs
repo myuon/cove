@@ -328,6 +328,11 @@ impl OwnedVm {
         self.vm.collections()
     }
 
+    /// [`Vm::collections_while_compiled`].
+    pub fn collections_while_compiled(&self) -> u64 {
+        self.vm.collections_while_compiled()
+    }
+
     /// [`Vm::assertion_failure`]: where the last failed `assert` of the last
     /// run was, and its message, for a test runner reporting at the
     /// assertion rather than at the test.

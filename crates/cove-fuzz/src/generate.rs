@@ -939,7 +939,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             2..=4 => {
                 let s = self.string_atom();
-                let (from, to) = self.byte_range(&s);
+                let (from, to) = self.byte_range(&s, 1);
                 format!("{pad}{name}.appendSlice({s}, {from}, {to})\n")
             }
             5 | 6 => {
@@ -1055,13 +1055,17 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// A byte range over `s`: whole, a prefix, backwards, past the end, or
-    /// anything.
-    fn byte_range(&mut self, s: &str) -> (String, String) {
+    /// anything — an `Int` one level below `depth`, the depth of the form the
+    /// range is in. It was a fixed depth once, and an `Int` can be a string's
+    /// `byteLength()`, so a `sliceBytes` inside a `sliceBytes`'s bounds
+    /// chained without the depth growing until the parser refused it
+    /// (`fuzz/regressions/differential/generator-byte-range-nests-too-deep`).
+    fn byte_range(&mut self, s: &str, depth: usize) -> (String, String) {
         match self.pick(6) {
             0 | 1 => ("0".to_string(), format!("{s}.byteLength()")),
             2 => (format!("{s}.byteLength()"), "0".to_string()),
             3 => ("1".to_string(), format!("({s}.byteLength() + 1)")),
-            4 => (self.int(2), self.int(2)),
+            4 => (self.int(depth + 1), self.int(depth + 1)),
             _ => {
                 let from = self.pick(4).to_string();
                 (from, self.pick(8).to_string())
@@ -1559,7 +1563,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             5 | 6 => {
                 let s = self.string_atom();
-                let (from, to) = self.byte_range(&s);
+                let (from, to) = self.byte_range(&s, d);
                 let or = self.string_literal();
                 format!("{s}.sliceBytes({from}, {to}).unwrapOr({or})")
             }

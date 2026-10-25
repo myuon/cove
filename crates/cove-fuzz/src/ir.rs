@@ -313,10 +313,12 @@ fn machine_run(
     let answer = vm.invoke_lowered(&subject.module, &subject.name, args);
     let collections = vm.collections();
     let native_calls = vm.tiers().native();
+    let under_compiled = vm.collections_while_compiled();
     drop(vm);
     let mut observed = differential::observe(mode, answer, &out, &err);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
+    observed.collections_while_compiled = Some(under_compiled);
     observed
 }
 
