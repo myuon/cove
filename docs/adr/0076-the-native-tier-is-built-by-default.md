@@ -1,6 +1,9 @@
 # ADR 0076: The native tier is built by default
 
 - Status: Accepted
+- Superseded in part by [ADR 0122](0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md):
+  its "The default *backend* does not change". With no `--backend`, a command
+  now runs on the native tier this ADR builds, where the host has one
 - Date: 2026-10-01
 - Decides: that the `cove` binary is built with the native tier — `cove-cli`'s
   `template` feature is on by default — so that `--backend native` works on a

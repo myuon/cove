@@ -181,9 +181,18 @@ jobs:
         working-directory: examples
         run: ../target/checked/cove test
 
-      # The two steps above run on the linear-memory backend, because ADR
-      # 0034 makes that what a command that runs a program runs it on. The
-      # interpreter is still the oracle, and these are the project's own
+      # The two steps above run on the default, which since ADR 0122 is the
+      # fastest tier this host has: the native tier on this Linux x86-64
+      # runner, where each prints which tier ran. The linear-memory backend is
+      # what a host without the tier runs, and what every function the native
+      # tier refuses runs on, so it is run here by name as well.
+      - name: cove generate --check and cove test on the VM (examples)
+        working-directory: examples
+        run: |
+          ../target/checked/cove generate --check --backend vm
+          ../target/checked/cove test --backend vm
+
+      # The interpreter is still the oracle, and these are the project's own
       # sources — the first real programs to feel a divergence — so they are
       # run on it too. Both together cost under a second.
       - name: cove generate --check and cove test on the interpreter (examples)
@@ -193,8 +202,9 @@ jobs:
           ../target/checked/cove test --backend ast
 
       # covefmt is a package of its own (issue 556), so the `examples` steps
-      # above no longer reach it. The same checks, on both backends; it
-      # generates nothing, so there is no `generate --check` to run.
+      # above no longer reach it. The same checks, on the default (native
+      # here), the VM and the interpreter; it generates nothing, so there is
+      # no `generate --check` to run.
       - name: cove check (tools/covefmt)
         working-directory: tools/covefmt
         run: ../../target/checked/cove check
@@ -202,6 +212,10 @@ jobs:
       - name: cove test (tools/covefmt)
         working-directory: tools/covefmt
         run: ../../target/checked/cove test
+
+      - name: cove test on the VM (tools/covefmt)
+        working-directory: tools/covefmt
+        run: ../../target/checked/cove test --backend vm
 
       - name: cove test on the interpreter (tools/covefmt)
         working-directory: tools/covefmt

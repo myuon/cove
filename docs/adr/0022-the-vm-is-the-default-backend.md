@@ -3,6 +3,10 @@
 - Status: Accepted
 - Superseded in part by [ADR 0023](0023-a-replay-chooses-its-backend.md),
   which replaces the decision below that `cove replay` does not move
+- Superseded in part by [ADR 0122](0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md),
+  which replaces "The VM is what runs a Cove program" for every command that
+  runs a program but `cove build`: with no `--backend`, the native tier where
+  this host has one, the VM otherwise
 - Date: 2026-08-29
 - Supersedes: [ADR 0009](0009-cove-build.md)'s decision that the executable
   `cove build` writes embeds the tree-walking interpreter — "a binary that

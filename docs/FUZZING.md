@@ -480,8 +480,9 @@ or `-jobs=N` is the way to spend more cores on it.
    - A disagreement, once fixed, deserves an end-to-end case as well as the
      fuzz input, because the end-to-end corpus is what every other harness
      reads: `crates/cove-cli/tests/differential.rs` runs it on the interpreter
-     and the VM, an empty `native` file beside it makes `tests/e2e.rs` run it
-     on `--backend native` against the VM, and `expected.out` pins the right
+     and the VM, `tests/e2e.rs` runs it on the default — the native tier where
+     the host has one (ADR 0122) — and again on `--backend vm` and on the
+     interpreter against that, and `expected.out` pins the right
      answer, which no differential can. Write the hand-shrunk program as
      `tests/e2e/<name>/main.cove` with its `expected.out`, and add its
      `[run.<name>]` row to `tests/e2e/cove.toml` — forgetting the row fails

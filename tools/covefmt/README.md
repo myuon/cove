@@ -532,8 +532,10 @@ $ cd tools/covefmt && ../../target/checked/cove run covefmtBench --files-root ..
 
 It compiles every supported reachable function of one lowered program eagerly,
 finalizes once, and the encoded `CALL` arm consults the same table generated
-code does — so a compiled function called from an encoded one is entered. The
-default *backend* does not change, and a build without the feature
+code does — so a compiled function called from an encoded one is entered.
+Since ADR 0122 it is also what a `cove run` with no `--backend` runs on where
+the host has it (`--backend native` above asks for the full report rather
+than its one line), and a build without the feature
 (`--no-default-features`, or any embedder of `cove-runtime`) has no
 executable-memory dependency.
 

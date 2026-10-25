@@ -96,8 +96,17 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The backend `cove run` runs a program on when none is named: the native
+/// tier where this binary has one on a host it runs on, the VM otherwise
+/// (ADR 0122). The expression is every native test's gate.
+const DEFAULT: &str = if cfg!(all(feature = "template", target_arch = "x86_64", unix)) {
+    "native"
+} else {
+    "vm"
+};
+
 /// Records a trace of `cove run restricted` into `path`, on whatever
-/// backend `cove run` runs a program on — the VM, since ADR 0022.
+/// backend `cove run` runs a program on — [`DEFAULT`], since ADR 0122.
 ///
 /// Deliberately not pinned to a backend. Almost every test below is about
 /// what a trace holds and what a replay makes of it, and the recording it
@@ -141,8 +150,8 @@ fn record_tasks_host_order(path: &Path) -> String {
 ///
 /// The same program and the same fakes as [`record`], differing only in which
 /// backend ran it, so the two files can be compared line for line. This is
-/// the half that has to name a backend now: the default is the VM, so the
-/// oracle is what has to be asked for.
+/// the half that has to name a backend now: the default is a lowered tier, so
+/// the oracle is what has to be asked for.
 fn record_on_the_interpreter(path: &Path) -> String {
     let run = cove(&[
         "run",
@@ -206,7 +215,7 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         // of them naming a backend. The recording is the default backend's;
         // since ADR 0026 the replay is that one's *because the file says so*
         // rather than because both defaults happen to agree.
-        ("vm", &on_the_backend, None, "vm"),
+        (DEFAULT, &on_the_backend, None, DEFAULT),
         // The case ADR 0026 is for, and the one no flag could express before
         // it: an interpreter recording, replayed with no flag, runs on the
         // interpreter. Under ADR 0023 this same command line crossed
@@ -216,9 +225,10 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         // and now a crossing the command can see and name.
         ("ast", &on_the_interpreter, Some("vm"), "vm"),
         // The direction that worked before ADR 0023, which must keep working.
-        ("vm", &on_the_backend, Some("ast"), "ast"),
+        (DEFAULT, &on_the_backend, Some("ast"), "ast"),
         ("ast", &on_the_interpreter, Some("ast"), "ast"),
-        ("vm", &on_the_backend, Some("vm"), "vm"),
+        (DEFAULT, &on_the_backend, Some("vm"), "vm"),
+        (DEFAULT, &on_the_backend, Some(DEFAULT), DEFAULT),
     ] {
         let path = trace.display().to_string();
         let mut args = vec!["replay", path.as_str(), "restricted"];
@@ -417,7 +427,8 @@ fn without_wall_clock(trace: &str) -> String {
     out.push_str(rest);
     without_heap(
         &out.replace(r#""backend":"ast","#, r#""backend":"<either>","#)
-            .replace(r#""backend":"vm","#, r#""backend":"<either>","#),
+            .replace(r#""backend":"vm","#, r#""backend":"<either>","#)
+            .replace(r#""backend":"native","#, r#""backend":"<either>","#),
     )
 }
 
@@ -479,7 +490,7 @@ fn a_recorded_run_reads_back_and_replays() {
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
     assert!(
-        recorded.starts_with(r#"{"event":"trace_header","version":4,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#),
+        recorded.starts_with(&format!(r#"{{"event":"trace_header","version":4,"backend":"{DEFAULT}","values":"full","entry":"restricted.main","args":[]}}"#)),
         "{recorded}"
     );
 
@@ -537,6 +548,7 @@ fn a_program_that_asks_for_a_different_call_diverges() {
         "a divergence must fail the replay"
     );
     let report = stderr(&replay);
+    let ran_on = format!("this replay ran on `{DEFAULT}`, which is the backend that");
     for expected in [
         "divergence: the program asked for a different host call",
         "at recorded call   2",
@@ -545,7 +557,7 @@ fn a_program_that_asks_for_a_different_call_diverges() {
         // No flag was given, so the replay ran on the backend the file names,
         // and the report says the strong thing ADR 0023 could not say: this
         // divergence is the program's.
-        "this replay ran on `vm`, which is the backend that",
+        ran_on.as_str(),
         "recorded the trace, so a divergence is the program's rather",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
@@ -580,10 +592,11 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
         "a divergence must fail the replay"
     );
     let report = stderr(&replay);
+    let recorded_on = format!("`{DEFAULT}`, so a divergence here could be the two backends'");
     for expected in [
         "divergence: the program asked for a different host call",
         "this replay ran on `ast` and the trace was recorded on",
-        "`vm`, so a divergence here could be the two backends'",
+        recorded_on.as_str(),
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
     }
@@ -595,7 +608,7 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
 fn a_summary_names_the_backend_that_recorded_the_trace() {
     let dir = TempDir::new("summary-backend");
     for (name, record_it, expected) in [
-        ("vm.jsonl", record as fn(&Path) -> String, "vm"),
+        ("default.jsonl", record as fn(&Path) -> String, DEFAULT),
         (
             "ast.jsonl",
             record_on_the_interpreter as fn(&Path) -> String,

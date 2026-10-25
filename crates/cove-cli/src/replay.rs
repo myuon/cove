@@ -498,7 +498,7 @@ impl HostApi for ReplayHost {
     }
 }
 
-/// `cove replay <trace> <run-name> [--backend <ast|vm>]`.
+/// `cove replay <trace> <run-name> [--backend <ast|vm|native>]`.
 pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // `--backend` comes out first, by the one function `cove generate` reads
     // it with, so the flag means the same thing and refuses an unknown value
@@ -586,15 +586,13 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // because the lowering reports every gap in what the entry reaches rather
     // than the first; a replay that cannot be run is still a replay that
     // reads no tape.
-    // A recording made by a native run names `native` in its header, and ADR
-    // 0026 makes the default replay the backend that wrote the file — so this is
-    // the one place the refusal is reached without anybody typing it. It is still
-    // a refusal: replaying a native run on the VM without saying so would be the
-    // silent substitution ADR 0055 forbids, and the message names the flag that
-    // does say so.
-    if backend == Backend::Native {
-        return Err(crate::native_is_not_here("replay"));
-    }
+    // A recording made by a native run names `native` in its header — since ADR
+    // 0122 that is every `cove run` on a host with the tier — and ADR 0026 makes
+    // the default replay the backend that wrote the file, so a native trace is
+    // replayed on the native tier. On a host or build without it the answer is
+    // ADR 0055's capability diagnostic, not the VM: replaying a native run on
+    // the VM without saying so would be the silent substitution that ADR
+    // forbids, and the message names the flag that does say so.
     let lowered = match backend {
         Backend::Ast => None,
         Backend::Vm | Backend::Native => {
@@ -611,6 +609,24 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
             })?;
             Some(Arc::new(ir))
         }
+    };
+
+    // Compiled before the tape exists, for the lowering's reason above, and
+    // owned past the run because it owns the pages the run's entries point into.
+    let native = match (backend, &lowered) {
+        (Backend::Native, Some(ir)) => {
+            Some(cove_runtime::compile_native(ir).map_err(|unavailable| {
+                CliError::Message(match chosen {
+                    Some(_) => unavailable.to_string(),
+                    None => format!(
+                        "{unavailable}\n  `cove replay` runs a trace on the backend that recorded \
+                     it, and this one was recorded on `{recorded}`; `--backend vm` replays it on \
+                     the encoded VM instead, as a cross-backend replay that says so"
+                    ),
+                })
+            })?)
+        }
+        _ => None,
     };
 
     let steps: Vec<Step> = trace.dispatched_calls().into_iter().map(Step::of).collect();
@@ -650,10 +666,25 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // reaches it exactly as a run does. What differs between two replays is
     // which evaluator is built; the tape they read is the same object,
     // reached through the one `HostApi` boundary both share.
-    let outcome = match &lowered {
-        Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
-        None => Interpreter::new(&runtime).run_entry(module, entry, program_args),
+    let (outcome, coverage) = match (&lowered, &native) {
+        (Some(ir), Some(native)) => {
+            let mut vm = Vm::with_native(&runtime, runtime.hosts(), ir, native);
+            let outcome = vm.run_entry(module, entry, program_args);
+            (outcome, Some(crate::Coverage::taken(native, &vm)))
+        }
+        (Some(ir), None) => (
+            Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
+            None,
+        ),
+        (None, _) => (
+            Interpreter::new(&runtime).run_entry(module, entry, program_args),
+            None,
+        ),
     };
+    // Which tier ran, in the line a run the default put there prints.
+    if let Some(coverage) = &coverage {
+        eprintln!("{}", coverage.summary());
+    }
 
     let (used, unchecked, divergence) = {
         let mut tape = tape

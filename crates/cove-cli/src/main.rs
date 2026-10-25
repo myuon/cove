@@ -51,7 +51,7 @@ usage:
   cove build <name> [--out <path>]     package that run as a native executable
   cove generate <name>                 run <name>'s entry and write its source to `generates`
   cove generate --check                fail if any `generates` file is stale
-  cove test [path] [--filter <sub>] [--seed <n>]
+  cove test [path] [--filter <sub>] [--seed <n>] [--backend <ast|vm|native>]
                                        run every `test fn` the package declares
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
@@ -90,10 +90,15 @@ limits are the ones `[run.<name>]` recorded when it was built, and a
 and this toolchain's own source, because an executable has to link the
 runtime; `cove build --help` says so in full, and ADR 0009 says why.
 
-The linear-memory backend of ADR 0034 is what runs a program.
-`cove run --backend ast` runs the entry on the tree-walking interpreter
-instead, which is the semantic oracle and what a disagreement between the two
-is decided by. What is lowered is what the entry can reach, so a construct
+With no `--backend`, a program runs on the fastest tier this build and host
+have (ADR 0122): the native tier of ADR 0055 on x86-64 Unix, which compiles
+every function it can to machine code and runs the rest on the linear-memory
+backend of ADR 0034, and that backend alone everywhere else. A native run
+says so on stderr in one line — how much was compiled, and how many calls
+used it — and `--backend native` prints the whole report. `--backend vm`
+runs the linear-memory backend by name. `cove run --backend ast` runs the
+entry on the tree-walking interpreter instead, which is the semantic oracle
+and what a disagreement between them is decided by. What is lowered is what the entry can reach, so a construct
 elsewhere in the package cannot stop an entry that does not reach it. The
 backend answers no admission predicate: a construct its lowering has not been
 taught is a gap in the lowering rather than a program it declines, and what
@@ -111,10 +116,13 @@ thing they meant. There is no flag for it: there is one execution form.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
-contains the given substring, and `--backend <ast|vm>` chooses which
-backend runs them, defaulting to `vm` as `cove run` does. Each test is
-lowered on its own, so a gap in the lowering fails that test and not the
-suite. Each test is granted exactly the
+contains the given substring, and `--backend <ast|vm|native>` chooses which
+backend runs them, defaulting as `cove run` does to the native tier where
+this host has one and to `vm` otherwise. Each test is lowered on its own, so
+a gap in the lowering fails that test and not the suite; on the native tier
+each test is compiled once, a property's cases all run over that one
+compilation, and the suite reports on stderr, after the last test, how much
+of it ran native and why the rest did not. Each test is granted exactly the
 capabilities its call graph requires, with each host's fake implementation,
 so a suite is deterministic; `cove.toml`'s `[test] allow_real = [...]` names
 the capabilities to grant for real instead.
@@ -160,8 +168,8 @@ an explicit `run`. `cove generate --check` regenerates every run that sets
 `generates` into memory, compares it against what is on disk, and exits
 non-zero on the first file that differs, which is the form to run in CI.
 `--backend <ast|vm|native>` chooses the backend a generator runs on, defaulting
-to `vm`; it is the only `cove run` flag `cove generate` takes, because every
-other budget is `[run.<name>]`'s.
+as `cove run` does; it is the only `cove run` flag `cove generate` takes,
+because every other budget is `[run.<name>]`'s.
 
 `cove trace` reads a JSONL trace written by `cove run --trace` and prints a
 summary and a timeline. It reports which of the distinctions ADR 0001 asks a
@@ -173,7 +181,7 @@ program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
 have, asked for a different one, or stopped before using them all.
-`--backend <ast|vm>` chooses which backend replays it, defaulting since
+`--backend <ast|vm|native>` chooses which backend replays it, defaulting since
 ADR 0026 to the one the trace says recorded it rather than to `cove run`'s
 default, so an ordinary replay is a same-backend replay and is one by reading
 the file. Naming the flag replays across backends deliberately, which stays
@@ -201,7 +209,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
+  --backend <ast|vm|native>  which backend runs the entry: `native`, ADR 0055's native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which — and the default where this build and host have it; `vm`, the linear-memory backend of ADR 0034 and the default everywhere else; or `ast`, the tree-walking interpreter and the semantic oracle. `native` needs a build with the `template` feature (the default) and an x86-64 Unix host, and says so rather than falling back when it does not have one. With no `--backend`, `--profile` runs on `vm`, the one tier that can answer it
   --stats               print the backend's lowering and execution times and the instructions it executed, then host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
@@ -1545,8 +1553,16 @@ pub(crate) fn execute_entry(
     // present a mixed run as fully native", and issue #369 that "a mixed run
     // reports its mixture; it must not be presented as fully native". A report
     // nobody asked for is what stops a silent claim.
+    //
+    // The whole report for a run that named `--backend native`, and one line
+    // for a run the default put there (ADR 0122): the line says which tier ran
+    // and how much of the run it was, which is what forbids the silent claim,
+    // and the table is for a reader who asked.
     if let Some(coverage) = &coverage {
-        coverage.print(execution);
+        match flags.backend_named {
+            true => coverage.print(execution),
+            false => eprintln!("{}", coverage.summary()),
+        }
     }
     // Beside the coverage report and after it, because the coverage report says
     // which functions ran where and this says what crossed between them. Its own
@@ -1574,6 +1590,23 @@ pub(crate) fn execute_entry(
     outcome.map_err(ExecuteError::Runtime)
 }
 
+/// The share of a run's Cove calls that entered compiled code, as a percentage.
+///
+/// One function because two reports print it — a run's and a suite's — and two
+/// copies of a ratio are two denominators waiting to differ.
+pub(crate) fn native_share(tiers: cove_runtime::Tiers) -> f64 {
+    match tiers.calls() {
+        0 => 0.0,
+        calls => {
+            100.0
+                * (tiers.vm_to_native
+                    + tiers.native_to_native_direct
+                    + tiers.native_to_native_mediated) as f64
+                / calls as f64
+        }
+    }
+}
+
 /// How much of a native run was native, and what the refusals cost it.
 ///
 /// [ADR 0055]: "The run reports how many calls and functions used each tier, so a
@@ -1593,7 +1626,7 @@ pub(crate) fn execute_entry(
 ///   nobody — which is the accounting issue #369 asks for in as many words.
 ///
 /// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
-struct Coverage {
+pub(crate) struct Coverage {
     reachable: usize,
     stubs: usize,
     compiled: usize,
@@ -1616,7 +1649,7 @@ impl Coverage {
     /// The counts are the *run's* and the refusals the *program's*, and
     /// `Refused::id` is the only thing that joins them: a table cannot know how
     /// often a function was called and a run cannot know why it was refused.
-    fn taken(native: &cove_runtime::NativeProgram, vm: &Vm<'_>) -> Coverage {
+    pub(crate) fn taken(native: &cove_runtime::NativeProgram, vm: &Vm<'_>) -> Coverage {
         let calls = vm.refused_calls();
         let mut refused: Vec<(cove_runtime::Refused, u64)> = native
             .refusals()
@@ -1706,6 +1739,24 @@ impl Coverage {
         }
     }
 
+    /// The report in one line, for a run the default put on the native tier.
+    ///
+    /// The two figures a reader needs to know which tier ran — how much of the
+    /// program was compiled and how much of the run's calls entered compiled
+    /// code — and where the rest is.
+    pub(crate) fn summary(&self) -> String {
+        let tiers = self.tiers;
+        format!(
+            "native: {} of {} reachable function(s) compiled, {} refused; {:.1}% of {} Cove \
+             call(s) used native code (`--backend native` reports the mixture in full)",
+            self.compiled,
+            self.reachable,
+            self.refused.len(),
+            native_share(tiers),
+            thousands(tiers.calls()),
+        )
+    }
+
     /// Prints the report, on stderr, whether or not `--stats` was asked for.
     ///
     /// `execution` is the run's wall time with compilation already outside it —
@@ -1739,16 +1790,7 @@ impl Coverage {
         );
         let tiers = self.tiers;
         let calls = tiers.calls();
-        let native_share = match calls {
-            0 => 0.0,
-            calls => {
-                100.0
-                    * (tiers.vm_to_native
-                        + tiers.native_to_native_direct
-                        + tiers.native_to_native_mediated) as f64
-                    / calls as f64
-            }
-        };
+        let native_share = native_share(tiers);
         eprintln!("native: calls, by the tier each crossed from and to");
         eprintln!("  {:<26} {:>14}", "VM -> VM", thousands(tiers.vm_to_vm));
         eprintln!(
@@ -1940,7 +1982,7 @@ fn render_blocker(blocker: &cove_runtime::Blocker) -> String {
 
 /// `n` with a separator every three digits, because these numbers reach tens of
 /// millions and a reader counts digits otherwise.
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (at, digit) in digits.chars().enumerate() {
@@ -2276,12 +2318,18 @@ fn print_backend_stats(
 /// `Cancellation` from outside; only the limits below can stop a run.
 #[derive(Clone)]
 pub(crate) struct RunFlags {
-    /// Which backend runs the entry. `vm` is the default: issue #111's gate
-    /// was passed and ADR 0022 records the decision for the backend of the
-    /// day, and ADR 0034 kept the arrangement when it replaced that backend
-    /// with this one. `ast` remains what a disagreement is decided by, which
-    /// is a different job from running a program.
+    /// Which backend runs the entry. Unnamed, it is the fastest tier this
+    /// build and host have — native where there is one, `vm` otherwise — as
+    /// ADR 0122 decides, superseding ADR 0022's `vm` default for every command
+    /// that runs a program. `ast` remains what a disagreement is decided by,
+    /// which is a different job from running a program.
     backend: Backend,
+    /// Whether `--backend` was written, rather than [`Backend::default_for_a_run`]
+    /// chosen. A native run named on the command line prints ADR 0055's whole
+    /// mixture report; one the default chose prints its one-line summary,
+    /// because a report a run did not ask for is there to say which tier ran
+    /// and not to be read as a benchmark.
+    backend_named: bool,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     /// The tasks the run may hold alive at once, across the whole run,
@@ -2319,6 +2367,7 @@ impl RunFlags {
     pub(crate) fn none() -> RunFlags {
         RunFlags {
             backend: Backend::default_for_a_run(),
+            backend_named: false,
             deadline: None,
             max_host_calls: None,
             max_tasks: None,
@@ -2338,15 +2387,17 @@ impl RunFlags {
     /// rather than through [`parse_run_flags`].
     pub(crate) fn set_backend(&mut self, backend: Backend) {
         self.backend = backend;
+        self.backend_named = true;
     }
 }
 
 /// Which backend runs the entry.
 ///
-/// The linear-memory backend of ADR 0034 is the default and is what a program
-/// runs on. The interpreter stays selectable, and stays the oracle: a backend
-/// checked against it is presumed wrong when the two disagree, whichever of
-/// them a run reached by default.
+/// Unnamed, a program runs on the fastest tier this build and host have: the
+/// native tier where there is one and the linear-memory backend of ADR 0034
+/// otherwise (ADR 0122). The interpreter stays selectable, and stays the
+/// oracle: a backend checked against it is presumed wrong when the two
+/// disagree, whichever of them a run reached by default.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Backend {
     /// The tree-walking interpreter.
@@ -2362,11 +2413,11 @@ pub(crate) enum Backend {
     /// The native tier of ADR 0055, over the same `cove-ir` [`Backend::Vm`]
     /// runs.
     ///
-    /// **Experimental, explicit and never the default.** ADR 0055 keeps the VM
-    /// the default until its adoption gate passes, and issue #369 says in as many
-    /// words that this is "an experimental backend gate, not permission to make
-    /// native execution the default". [`Backend::default_for_a_run`] is unchanged
-    /// and is the one place that decision lives.
+    /// **The default where this build and host have it.** ADR 0055 kept the VM
+    /// the default and issue #369 called the tier an experiment; ADR 0076 built
+    /// it by default, ADR 0077 ran `cove fmt` on it, and ADR 0122 makes it what
+    /// every command that runs a program uses when no `--backend` is named.
+    /// [`Backend::default_for_a_run`] is the one place that decision lives.
     ///
     /// It is a third variant rather than a modifier on `Vm`, and the reason is
     /// what a reader of a `--stats` line or a trace header needs: a native run
@@ -2383,16 +2434,34 @@ pub(crate) enum Backend {
 
 impl Backend {
     /// The backend a command that runs a program uses when nobody named
-    /// one.
+    /// one: the fastest tier this build and this host have — [`Backend::Native`]
+    /// where [`cove_runtime::native_available`] answers `Ok`, [`Backend::Vm`]
+    /// where it does not ([ADR 0122]).
     ///
     /// One function rather than a literal at each command, because "the
-    /// default backend" is one decision and five commands make it: `cove
-    /// run`, `cove generate`, `cove test`, `cove build`, and — since ADR
-    /// 0023 — `cove replay`. Written out five times it could be changed in
-    /// four places, and a toolchain whose commands disagreed about which
-    /// backend runs a program would be a mixture nobody asked for.
+    /// default backend" is one decision: `cove run`, `cove generate` and
+    /// `cove test` take it as it stands. Two commands take it and then narrow
+    /// it, for a reason of their own written where they do: `cove build`
+    /// embeds a backend in an executable and has no native tier to embed, so
+    /// it builds for the VM; `cove replay` reads the backend from the trace
+    /// (ADR 0026) and asks this only for none. And `cove run --profile` with
+    /// no `--backend` runs the VM, because the native tier cannot answer a
+    /// profile (ADR 0055).
+    ///
+    /// Not a fallback in ADR 0055's sense: the VM is chosen on a host without
+    /// the tier because nobody asked for the tier, and a run that names
+    /// `--backend native` there still gets the capability diagnostic. The
+    /// native run reports its mixture, so a reader always learns which tier
+    /// ran. Asked once per process: the probe compiles the empty program,
+    /// which maps a page.
+    ///
+    /// [ADR 0122]: ../../../docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md
     pub(crate) fn default_for_a_run() -> Backend {
-        Backend::Vm
+        static FASTEST: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
+        *FASTEST.get_or_init(|| match cove_runtime::native_available() {
+            Ok(()) => Backend::Native,
+            Err(_) => Backend::Vm,
+        })
     }
 
     pub(crate) fn parse(value: &str) -> Option<Backend> {
@@ -2457,10 +2526,13 @@ impl Backend {
 
 /// Why a command refuses `--backend native`.
 ///
-/// ADR 0055 makes the native tier explicit and default-off, and issue #369 makes
-/// it an experiment. So it is wired where a *program runs under one lowering and
-/// one report* — `cove run` and `cove generate` — and refused elsewhere, rather
-/// than accepted and quietly ignored.
+/// Since ADR 0122 every command that runs a program runs it on the native tier
+/// where there is one — except one that cannot host the tier for a structural
+/// reason, and `cove build` is that one: what it builds is an executable that
+/// embeds a backend, and the native tier is not embeddable yet (ADR 0055 leaves
+/// "whether `cove build` embeds JIT code, links an object, or keeps the VM"
+/// open). So it refuses the flag rather than accepting it and quietly ignoring
+/// it.
 ///
 /// A refusal and not a fallback, which is the whole of what this function is for.
 /// ADR 0055: "Selecting native execution on an unsupported target produces a
@@ -2474,11 +2546,11 @@ impl Backend {
 /// the answer can disagree.
 pub(crate) fn native_is_not_here(command: &str) -> CliError {
     CliError::Message(format!(
-        "`cove {command}` does not run the native tier of ADR 0055. It is an explicit, \
-         default-off experiment (issue #369) and is wired to `cove run` and `cove \
-         generate`, which run one program under one lowering and report the mixture \
-         they ran as. Use `--backend vm`, which is the same lowering and the same \
-         semantics, or run this program through `cove run --backend native`."
+        "`cove {command}` does not run the native tier of ADR 0055: what it builds \
+         embeds a backend, and the native tier cannot be embedded yet, so it builds \
+         for the `vm` (ADR 0122). Use `--backend vm`, which is the same lowering and \
+         the same semantics, or run this program through `cove run`, which uses the \
+         native tier where this host has one."
     ))
 }
 
@@ -2491,22 +2563,17 @@ pub(crate) fn native_is_not_here(command: &str) -> CliError {
 /// rather than each parsing it, so the value it accepts and the sentence an
 /// unknown one is refused with are one thing rather than several that could
 /// drift.
-pub(crate) fn split_backend(args: &[String]) -> Result<(Backend, Vec<String>), CliError> {
-    let (backend, rest) = split_backend_if_named(args)?;
-    Ok((backend.unwrap_or_else(Backend::default_for_a_run), rest))
-}
-
-/// The same split, answering `None` for a command that was given no
-/// `--backend`.
 ///
-/// `cove replay` is the one command with somewhere better than
+/// It answers `None` for a command that was given no `--backend`, because
+/// both of them need to know. `cove replay` has somewhere better than
 /// [`Backend::default_for_a_run`] to look when nobody named a backend: since
 /// ADR 0026 the trace says which backend wrote it, and a replay of it should
-/// be that backend. Whether the flag was written is therefore a question
-/// that command has to be able to ask, and it asks it here rather than by
-/// scanning the arguments a second time — the value `--backend` accepts and
-/// the sentence an unknown one is refused with stay in one place, which is
-/// the whole point of this function.
+/// be that backend. `cove generate` reports a native run the default chose in
+/// one line and one that was named in full (ADR 0122). Whether the flag was
+/// written is therefore a question each has to be able to ask, and it asks it
+/// here rather than by scanning the arguments a second time — the value
+/// `--backend` accepts and the sentence an unknown one is refused with stay in
+/// one place, which is the whole point of this function.
 pub(crate) fn split_backend_if_named(
     args: &[String],
 ) -> Result<(Option<Backend>, Vec<String>), CliError> {
@@ -2569,6 +2636,7 @@ impl TraceTarget {
 fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
     let mut flags = RunFlags {
         backend: Backend::default_for_a_run(),
+        backend_named: false,
         deadline: None,
         max_host_calls: None,
         max_tasks: None,
@@ -2640,6 +2708,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                         Backend::NAMES
                     ))
                 })?;
+                flags.backend_named = true;
             }
             "--stats" => flags.stats = true,
             "--profile" => flags.profile = true,
@@ -2687,6 +2756,14 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
              profile without `--profile`"
                 .to_string(),
         ));
+    }
+    // ADR 0055: "Until a native profiler exists, requesting opcode profiling
+    // with native execution is refused or explicitly runs the VM." Named, a
+    // native profile is refused, by `execute_entry`; unnamed, the fastest tier
+    // that can answer the question asked is the VM, and that is the one the
+    // default picks (ADR 0122). Nobody asked for native, so nothing claims it.
+    if flags.profile && !flags.backend_named && flags.backend == Backend::Native {
+        flags.backend = Backend::Vm;
     }
     Ok(flags)
 }
@@ -3503,15 +3580,41 @@ module auth
         assert_eq!(flags.program_args, ["first", "second"]);
     }
 
-    /// The linear-memory backend is the default, and `cove generate` reaches
-    /// it through the same `RunFlags::none()` `cove run` reaches it through,
-    /// so the two are asserted together rather than separately: they are one
-    /// decision, and a change that moved only one of them would be the drift
-    /// ADR 0010's one-seam rule exists to prevent.
+    /// The fastest tier this host has is the default (ADR 0122), and `cove
+    /// generate` reaches it through the same `RunFlags::none()` `cove run`
+    /// reaches it through, so the two are asserted together rather than
+    /// separately: they are one decision, and a change that moved only one of
+    /// them would be the drift ADR 0010's one-seam rule exists to prevent.
     #[test]
     fn a_run_that_names_no_backend_gets_the_default() {
-        assert_eq!(flags(&["input.txt"]).backend, Backend::Vm);
-        assert_eq!(RunFlags::none().backend, Backend::Vm);
+        assert_eq!(flags(&["input.txt"]).backend, Backend::default_for_a_run());
+        assert_eq!(RunFlags::none().backend, Backend::default_for_a_run());
+        assert!(!flags(&["input.txt"]).backend_named);
+        assert!(flags(&["--backend", "vm"]).backend_named);
+    }
+
+    /// The default is native exactly where the tier runs: a build with the
+    /// code generator on a Unix x86-64 host, and the VM everywhere else. The
+    /// expression is the one every native test is gated on, so this is the
+    /// statement that the probe and the gate agree.
+    #[test]
+    fn the_default_is_native_where_the_tier_runs_and_the_vm_elsewhere() {
+        let expected = match cfg!(all(feature = "template", target_arch = "x86_64", unix)) {
+            true => Backend::Native,
+            false => Backend::Vm,
+        };
+        assert_eq!(Backend::default_for_a_run(), expected);
+    }
+
+    /// ADR 0055: a profile on the native tier is "refused or explicitly runs
+    /// the VM". Named, it is refused (by `execute_entry`); unnamed, the default
+    /// is the VM, because the native tier cannot answer what was asked.
+    #[test]
+    fn a_profile_with_no_backend_runs_the_vm() {
+        assert_eq!(flags(&["--profile"]).backend, Backend::Vm);
+        let named = flags(&["--profile", "--backend", "native"]);
+        assert_eq!(named.backend, Backend::Native);
+        assert!(named.backend_named);
     }
 
     /// ADR 0058's boundary report is off unless asked for, because it is counted,
@@ -3598,17 +3701,19 @@ module auth
         let args =
             |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_string()).collect() };
         let Ok((backend, rest)) =
-            split_backend(&args(&["t.jsonl", "--backend", "ast", "restricted"]))
+            split_backend_if_named(&args(&["t.jsonl", "--backend", "ast", "restricted"]))
         else {
             panic!("the flag parses");
         };
-        assert_eq!(backend, Backend::Ast);
+        assert_eq!(backend, Some(Backend::Ast));
         assert_eq!(rest, ["t.jsonl", "restricted"]);
 
-        let Ok((backend, rest)) = split_backend(&args(&["t.jsonl", "restricted", "--jit"])) else {
+        let Ok((backend, rest)) =
+            split_backend_if_named(&args(&["t.jsonl", "restricted", "--jit"]))
+        else {
             panic!("an unrelated flag is left where it was");
         };
-        assert_eq!(backend, Backend::default_for_a_run());
+        assert_eq!(backend, None);
         assert_eq!(rest, ["t.jsonl", "restricted", "--jit"]);
 
         for (given, expected) in [
@@ -3621,7 +3726,7 @@ module auth
                 "`--backend` needs a value: `ast`, `vm` or `native`",
             ),
         ] {
-            let Err(CliError::Message(message)) = split_backend(&args(&given)) else {
+            let Err(CliError::Message(message)) = split_backend_if_named(&args(&given)) else {
                 panic!("an unknown backend should be refused with a message");
             };
             assert_eq!(message, expected);

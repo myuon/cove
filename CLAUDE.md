@@ -149,8 +149,10 @@ generator behind the `template` feature. **Since
 across a workspace build, so all five commands above compile the code
 generator and `cargo t` runs its tests: `cove-native`'s 107-case
 `tests/template.rs`, `cove-runtime`'s 60-case `tests/native_tier.rs`, the
-native halves of `float_parse.rs` and `int_bits.rs`, and the end-to-end cases
-with a `native` file run on `--backend native` against the VM.
+native halves of `float_parse.rs` and `int_bits.rs`, and the end-to-end suite,
+whose golden files are the native tier's answer there (the default, since
+[ADR 0122](docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md))
+and every compared case of which is run again on `--backend vm` against them.
 
 Those tests are gated on `all(feature = "template", target_arch = "x86_64",
 unix)`, not on the feature alone — "the tier can *run* here" rather than "the
@@ -218,19 +220,25 @@ $ cd examples
 $ ../target/checked/cove check
 $ ../target/checked/cove generate --check
 $ ../target/checked/cove test
+$ ../target/checked/cove generate --check --backend vm
+$ ../target/checked/cove test --backend vm
 $ ../target/checked/cove generate --check --backend ast
 $ ../target/checked/cove test --backend ast
 $ cd ../tools/covefmt
 $ ../../target/checked/cove check
 $ ../../target/checked/cove test
+$ ../../target/checked/cove test --backend vm
 $ ../../target/checked/cove test --backend ast
 $ cd ../.. && ./target/checked/cove-bench --iterations 1
 ```
 
 `cove test` is the one that matters most and the one most easily forgotten:
-it runs 165 `test fn`s in `examples/` and 74 in `tools/covefmt/` — the Cove
-formatter, a package of its own since issue 556 — on the linear-memory backend
-and then on the interpreter, and it is the first place a lowering change is
+it runs 140 `test fn`s in `examples/` and 82 in `tools/covefmt/` (as of
+2026-10-25) — the Cove formatter, a package of its own since issue 556 — on
+the default, which is the native tier on an x86-64 Unix host (ADR 0122) and
+prints one `native:` report for the suite on stderr, then by name on the
+linear-memory backend and on the interpreter, and it is the first place a
+lowering change is
 felt by a *real* program rather than by a fixture. A change to the IR has been
 merged-shaped and green on the five commands while crashing there — the
 symptom was a VM panic writing past a frame, and nothing above `cove test`
