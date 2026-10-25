@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use cove_diag::SourceMap;
 use cove_runtime::host::{Grants, HostRegistry};
-use cove_runtime::{NativeProgram, Runtime, RuntimeError, Value, Vm};
+use cove_runtime::{PreparedProgram, Runtime, RuntimeError, Value, Vm};
 
 use crate::Backend;
 
@@ -51,14 +51,14 @@ pub(crate) enum Answer {
 ///
 /// Built once per `cove fmt`; [`Covefmt::session`] is what formats.
 pub(crate) struct Covefmt {
-    program: cove_ir::Program,
+    /// The program, prepared once, with its machine code where there is
+    /// some: kept until the last run, because it owns the pages its entries
+    /// point into.
+    prepared: PreparedProgram,
     module: Arc<str>,
     name: Arc<str>,
     runtime: Runtime,
     sources: Arc<SourceMap>,
-    /// Compiled before the first run and dropped after the last, because it
-    /// owns the pages its entries point into.
-    native: Option<NativeProgram>,
 }
 
 impl Covefmt {
@@ -72,13 +72,23 @@ impl Covefmt {
     pub(crate) fn load(backend: Option<Backend>) -> Result<Covefmt, String> {
         let image = cove_ir::serial::decode(IMAGE)
             .map_err(|why| format!("the formatter built into this `cove` cannot be read: {why}"))?;
-        let native =
+        let prepared = PreparedProgram::new(Arc::new(image.program));
+        // Named, every function is compiled before the first file; unnamed,
+        // each at the call that makes it hot (ADR 0123), so a `cove fmt` of one
+        // short file does not compile the formatter it barely runs.
+        let prepared =
             match backend {
-                Some(Backend::Vm) => None,
-                Some(Backend::Native) => {
-                    Some(cove_runtime::compile_native(&image.program).map_err(|e| e.to_string())?)
-                }
-                None => cove_runtime::compile_native(&image.program).ok(),
+                Some(Backend::Vm) => prepared,
+                Some(Backend::Native) => prepared
+                    .with_native_tiered(crate::tier_up(true), false)
+                    .map_err(|e| e.to_string())?,
+                None => match prepared
+                    .clone()
+                    .with_native_tiered(crate::tier_up(false), false)
+                {
+                    Ok(native) => native,
+                    Err(_) => prepared,
+                },
                 Some(Backend::Ast) => return Err(
                     "`cove fmt` cannot run on `--backend ast`: covefmt is carried as lowered IR"
                         .to_string(),
@@ -93,19 +103,18 @@ impl Covefmt {
         // not read it.
         let runtime = Runtime::new(Arc::default(), Arc::clone(&sources), hosts);
         Ok(Covefmt {
-            program: image.program,
+            prepared,
             module: image.module,
             name: image.name,
             runtime,
             sources,
-            native,
         })
     }
 
     /// Which tier this setup runs covefmt on.
     #[cfg(test)]
     pub(crate) fn tier(&self) -> Backend {
-        match self.native {
+        match self.prepared.native() {
             Some(_) => Backend::Native,
             None => Backend::Vm,
         }
@@ -118,12 +127,7 @@ impl Covefmt {
 
     /// One run of covefmt, invoked once per file.
     pub(crate) fn session(&self) -> Session<'_> {
-        let vm = match &self.native {
-            Some(native) => {
-                Vm::with_native(&self.runtime, self.runtime.hosts(), &self.program, native)
-            }
-            None => Vm::new(&self.runtime, self.runtime.hosts(), &self.program),
-        };
+        let vm = Vm::with_prepared(&self.runtime, self.runtime.hosts(), &self.prepared);
         Session {
             vm,
             module: &self.module,

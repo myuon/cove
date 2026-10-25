@@ -3412,11 +3412,8 @@ fn compiled_names() -> Vec<String> {
             .expect("the fixture lowers"),
     );
     let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
-    let refused: Vec<&str> = native
-        .refusals()
-        .iter()
-        .map(|row| row.name.as_str())
-        .collect();
+    let refusals = native.refusals();
+    let refused: Vec<&str> = refusals.iter().map(|row| row.name.as_str()).collect();
     lowered
         .functions
         .iter()

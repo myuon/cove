@@ -615,16 +615,24 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // owned past the run because it owns the pages the run's entries point into.
     let native = match (backend, &lowered) {
         (Backend::Native, Some(ir)) => {
-            Some(cove_runtime::compile_native(ir).map_err(|unavailable| {
-                CliError::Message(match chosen {
-                    Some(_) => unavailable.to_string(),
-                    None => format!(
+            // Named, compiled before the run; replayed because the trace
+            // names the tier, each function at the call that makes it hot, as
+            // the run the trace recorded did by default (ADR 0123).
+            let policy = crate::tier_up(chosen.is_some());
+            Some(
+                cove_runtime::compile_native_tiered(Arc::clone(ir), policy, false).map_err(
+                    |unavailable| {
+                        CliError::Message(match chosen {
+                            Some(_) => unavailable.to_string(),
+                            None => format!(
                         "{unavailable}\n  `cove replay` runs a trace on the backend that recorded \
                      it, and this one was recorded on `{recorded}`; `--backend vm` replays it on \
                      the encoded VM instead, as a cross-backend replay that says so"
                     ),
-                })
-            })?)
+                        })
+                    },
+                )?,
+            )
         }
         _ => None,
     };

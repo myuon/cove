@@ -307,7 +307,7 @@ impl WindowCode {
 pub mod subset;
 
 #[cfg(feature = "template")]
-pub use subset::{blockers, refusal, supported, Reason, Refusal};
+pub use subset::{blockers, refusal, refusal_given, supported, supported_given, Reason, Refusal};
 
 #[cfg(feature = "template")]
 pub mod template;

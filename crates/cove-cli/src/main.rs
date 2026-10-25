@@ -15,7 +15,8 @@ use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
     create_trace_file, Budget, Cancellation, Cost, HeapStats, JsonlSink, Limits, NullSink,
-    Profiler, RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture, Vm,
+    PreparedProgram, Profiler, RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink,
+    ValueCapture, Vm,
 };
 use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
@@ -1483,34 +1484,35 @@ pub(crate) fn execute_entry(
     // debugger is and the machine gains nothing for a run that asks for no
     // profile. See `cove_runtime::vm::profile`.
     let profiler = flags.profile.then(Profiler::new);
+    // The entry table, owned for the length of the run: `prepared` outlives
+    // `vm` because it owns the pages `vm`'s entries point into. See
+    // `cove_runtime::native`.
+    //
+    // A run that named `--backend native` compiles every function here, before
+    // the first instruction; a run the default put on the tier compiles each
+    // function at the call that makes it hot (ADR 0123), during the run.
+    // Either way the report takes the compiling back out of the execution
+    // figure, which is issue #369's "Compile time and execution time are
+    // reported separately".
+    //
+    // A run that asked for the boundary report binds the counting helpers, and
+    // only such a run: they are the same code with a counter in front of every
+    // helper, so a run that did not ask does not pay.
+    let prepared = match (lowered.as_ref(), flags.backend, profiler.is_some()) {
+        (Some(held), Backend::Native, false) => Some(
+            PreparedProgram::new(Arc::clone(&held.program))
+                .with_native_tiered(tier_up(flags.backend_named), flags.boundary)
+                .map_err(|error| ExecuteError::Setup(error.to_string()))?,
+        ),
+        _ => None,
+    };
     let (outcome, memory, instructions, coverage, boundary) =
         match lowered.as_ref().map(|l| &l.program) {
             Some(ir) => {
-                // The whole entry table, compiled and finalized **before the run**,
-                // and owned for the length of it: `native` outlives `vm` because it
-                // owns the pages `vm`'s entries point into. See
-                // `cove_runtime::native`.
-                //
-                // Its cost is taken here rather than inside `started`'s interval,
-                // which is issue #369's "Compile time and execution time are reported
-                // separately" — a figure covering both would hide which.
-                //
-                // A run that asked for the boundary report binds the counting
-                // helpers, and only such a run: they are the same code with a counter
-                // in front of every helper, so a run that did not ask does not pay.
-                let native = match flags.backend {
-                    Backend::Native => Some(
-                        match flags.boundary {
-                            false => cove_runtime::compile_native(ir),
-                            true => cove_runtime::compile_native_counting(ir),
-                        }
-                        .map_err(|error| ExecuteError::Setup(error.to_string()))?,
-                    ),
-                    Backend::Ast | Backend::Vm => None,
-                };
-                let mut vm = match (profiler.as_ref(), native.as_ref()) {
+                let native = prepared.as_ref().and_then(PreparedProgram::native);
+                let mut vm = match (profiler.as_ref(), prepared.as_ref()) {
                     (Some(profiler), _) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
-                    (None, Some(native)) => Vm::with_native(&runtime, runtime.hosts(), ir, native),
+                    (None, Some(held)) => Vm::with_prepared(&runtime, runtime.hosts(), held),
                     (None, None) => Vm::new(&runtime, runtime.hosts(), ir),
                 };
                 if flags.boundary {
@@ -1519,7 +1521,7 @@ pub(crate) fn execute_entry(
                 let outcome = vm.run_entry(module, entry, program_args);
                 // Read before `vm` and `native` go out of scope, because the report
                 // is printed after the timed region and neither lives that long.
-                let coverage = native.as_ref().map(|native| Coverage::taken(native, &vm));
+                let coverage = native.map(|native| Coverage::taken(native, &vm));
                 let boundary = vm.boundary();
                 (
                     outcome,
@@ -1546,7 +1548,14 @@ pub(crate) fn execute_entry(
                 )
             }
         };
-    let execution = started.elapsed();
+    // The compiling is inside `started`'s interval — before the run for a
+    // named `--backend native`, during it as functions became hot otherwise
+    // (ADR 0123) — and the report keeps the two apart: the execution figure is
+    // what is left once the compiling is taken back out.
+    let execution = match &coverage {
+        Some(coverage) => started.elapsed().saturating_sub(coverage.compile),
+        None => started.elapsed(),
+    };
 
     // Unconditionally, and not under `--stats`: ADR 0055 requires that "the run
     // reports how many calls and functions used each tier, so a benchmark cannot
@@ -1637,6 +1646,12 @@ pub(crate) struct Coverage {
     /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
     windows: cove_runtime::WindowCode,
     compile: Duration,
+    /// Whether the compiling happened during the run, as functions became hot
+    /// (ADR 0123), rather than before it.
+    during_run: bool,
+    /// Reachable functions never called often enough to be compiled, which are
+    /// not refusals. Nought when everything was compiled before the run.
+    not_hot: usize,
     tiers: cove_runtime::Tiers,
     /// Every refused function with the dynamic calls it kept in the VM, ranked by
     /// that number.
@@ -1669,6 +1684,8 @@ impl Coverage {
             code_bytes: native.code_bytes(),
             windows: native.window_code(),
             compile: native.compile_time(),
+            during_run: native.policy() != cove_runtime::TierUp::Eager,
+            not_hot: native.not_hot(),
             tiers: vm.tiers(),
             refused,
         }
@@ -1747,11 +1764,12 @@ impl Coverage {
     pub(crate) fn summary(&self) -> String {
         let tiers = self.tiers;
         format!(
-            "native: {} of {} reachable function(s) compiled, {} refused; {:.1}% of {} Cove \
-             call(s) used native code (`--backend native` reports the mixture in full)",
+            "native: {} of {} reachable function(s) compiled, {} refused, {} not hot; {:.1}% of \
+             {} Cove call(s) used native code (`--backend native` reports the mixture in full)",
             self.compiled,
             self.reachable,
             self.refused.len(),
+            self.not_hot,
             native_share(tiers),
             thousands(tiers.calls()),
         )
@@ -1776,6 +1794,15 @@ impl Coverage {
             self.code_bytes
         );
         self.print_windows();
+        // Apart from the refusals, because a function nobody called often
+        // enough is not one the code generator turned down (ADR 0123).
+        if self.during_run {
+            eprintln!(
+                "native: {} reachable function(s) were not called often enough to be compiled, \
+                 and ran on the VM; that is not a refusal",
+                self.not_hot
+            );
+        }
         // Apart from the figures above, and named, because a reader has to know
         // what the denominator excludes. See `NativeProgram::reachable`.
         eprintln!(
@@ -1784,8 +1811,12 @@ impl Coverage {
             self.stubs
         );
         eprintln!(
-            "native: compilation {:.1} ms, execution {:.1} ms — two measurements, never one",
+            "native: compilation {:.1} ms{}, execution {:.1} ms — two measurements, never one",
             self.compile.as_secs_f64() * 1000.0,
+            match self.during_run {
+                true => " (during the run, as functions became hot)",
+                false => "",
+            },
             execution.as_secs_f64() * 1000.0
         );
         let tiers = self.tiers;
@@ -2388,6 +2419,24 @@ impl RunFlags {
     pub(crate) fn set_backend(&mut self, backend: Backend) {
         self.backend = backend;
         self.backend_named = true;
+    }
+}
+
+/// When the native tier compiles a function: every function before the run
+/// when `--backend native` was named, and each at the call that makes it hot
+/// when the default chose the tier ([ADR 0123]).
+///
+/// Named, the tier is what was asked for — a measurement of it, a test of it,
+/// CI's byte-for-byte comparison of it with the VM — and a function called once
+/// still runs as machine code. Chosen by the default, the tier is there to be
+/// the fastest, and compiling a function that runs once is slower than not
+/// compiling it.
+///
+/// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+pub(crate) fn tier_up(named: bool) -> cove_runtime::TierUp {
+    match named {
+        true => cove_runtime::TierUp::Eager,
+        false => cove_runtime::TierUp::HOT,
     }
 }
 

@@ -93,12 +93,13 @@ pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Wo
 pub use cove_native::{Entry as NativeEntry, WindowCode};
 pub use native::{
     available as native_available, compile as compile_native,
-    compile_counting as compile_native_counting, Blocked, Blocker, NativeProgram, Refused,
+    compile_counting as compile_native_counting, compile_tiered as compile_native_tiered, Blocked,
+    Blocker, NativeProgram, Refused, TierUp, HOT_CALLS,
 };
 pub use vm::exec::native::{
     ablate as native_ablate, census_reset, census_taken, helpers as native_helpers,
     helpers_ablated as native_helpers_ablated, helpers_counting as native_helpers_counting, Census,
-    NothingCompiled, Session as NativeSession, Tiered, Tiers,
+    EntryCell as NativeEntryCell, NothingCompiled, Session as NativeSession, Tiered, Tiers,
 };
 pub use vm::exec::SAFEPOINT_STRIDE;
 pub use vm::profile::{Cost, Profiler};

@@ -43,13 +43,18 @@ pub enum TestBackend {
     Vm,
     /// The tree-walking interpreter, which lowers nothing.
     Ast,
-    /// Lowered as [`TestBackend::Vm`] is, then compiled to the native tier of
-    /// ADR 0055 once per test: a function the code generator refuses runs on
-    /// the encoded VM, and [`PreparedTest::native`] and [`Crossings`] are what
-    /// a runner reports the mixture from ([ADR 0122]).
+    /// Lowered as [`TestBackend::Vm`] is, then given the native tier of
+    /// ADR 0055 once per test, compiling under the [`TierUp`](crate::TierUp)
+    /// named: a function the code generator refuses runs on the encoded VM,
+    /// and so does one that has not become hot, and [`PreparedTest::native`]
+    /// and [`Crossings`] are what a runner reports the mixture from
+    /// ([ADR 0122], [ADR 0123]). Every case of a property runs over the one
+    /// table, so a function hot across the cases is compiled once for all of
+    /// them.
     ///
     /// [ADR 0122]: ../../../docs/adr/0122-with-no-backend-a-command-runs-on-the-fastest-tier-this-host-has.md
-    Native,
+    /// [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
+    Native(crate::TierUp),
 }
 
 /// How a suite's tests are run: what they are compiled against, on which
@@ -136,20 +141,20 @@ impl TestRun<'_> {
         // roots is lowered to one answer, so one unlowerable test would
         // become every test's refusal. Per test, a construct the backend
         // cannot run refuses only the tests that reach it.
-        let lowered =
-            match self.backend {
-                TestBackend::Ast => None,
-                TestBackend::Vm | TestBackend::Native => match cove_ir::lower_entry(
-                    self.program,
-                    self.sources,
-                    self.schemas,
-                    test.module,
-                    test.name,
-                ) {
-                    Ok(ir) => {
-                        let prepared = PreparedProgram::new(Arc::new(ir));
-                        match self.backend {
-                            TestBackend::Native => match prepared.with_native() {
+        let lowered = match self.backend {
+            TestBackend::Ast => None,
+            TestBackend::Vm | TestBackend::Native(_) => match cove_ir::lower_entry(
+                self.program,
+                self.sources,
+                self.schemas,
+                test.module,
+                test.name,
+            ) {
+                Ok(ir) => {
+                    let prepared = PreparedProgram::new(Arc::new(ir));
+                    match self.backend {
+                        TestBackend::Native(policy) => {
+                            match prepared.with_native_tiered(policy, false) {
                                 Ok(prepared) => Some(prepared),
                                 // The host's refusal, never a fallback (ADR 0055).
                                 // A runner that asks whether the tier exists before
@@ -167,18 +172,19 @@ impl TestRun<'_> {
                                         denied_capability: None,
                                     }))
                                 }
-                            },
-                            TestBackend::Vm | TestBackend::Ast => Some(prepared),
+                            }
                         }
+                        TestBackend::Vm | TestBackend::Ast => Some(prepared),
                     }
-                    Err(items) => {
-                        return Err(Box::new(TestFailure {
-                            diagnostic: unlowered(test, &items),
-                            denied_capability: None,
-                        }))
-                    }
-                },
-            };
+                }
+                Err(items) => {
+                    return Err(Box::new(TestFailure {
+                        diagnostic: unlowered(test, &items),
+                        denied_capability: None,
+                    }))
+                }
+            },
+        };
         Ok(PreparedTest { lowered })
     }
 

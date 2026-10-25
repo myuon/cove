@@ -988,6 +988,12 @@ pub(crate) struct Prepared {
     reflection: Arc<dynamic::Tables>,
     /// See [`Machine::agree`].
     agree: Arc<agree::Tables>,
+    /// Whether `cove_ir::verify` accepted the program, which [`Prepared::of`]
+    /// asked. Carried so that the native tier compiled over the same
+    /// preparation does not ask again: measured on `cove test` in
+    /// `tools/covefmt/`, the second verification was 73% of what compiling
+    /// the tier cost ([issue #713](https://github.com/myuon/cove/issues/713)).
+    verified: bool,
 }
 
 impl Prepared {
@@ -1006,7 +1012,10 @@ impl Prepared {
         if let Err(faults) = cove_ir::verify(program) {
             return Prepared::refused(encoded::unverified(&faults));
         }
-        Prepared::trusting(program)
+        Prepared {
+            verified: true,
+            ..Prepared::trusting(program)
+        }
     }
 
     /// `program` encoded and its tables built **without** `cove_ir::verify`:
@@ -1039,6 +1048,7 @@ impl Prepared {
                 .collect(),
             reflection: dynamic::tables(program),
             agree: agree::tables(program),
+            verified: false,
         }
     }
 
@@ -1052,12 +1062,26 @@ impl Prepared {
             fixed_payload_words: Arc::from([]),
             reflection: dynamic::empty_tables(),
             agree: Arc::default(),
+            verified: false,
         }
     }
 
     /// Whether the program this was prepared from may be run at all.
     pub(crate) fn is_runnable(&self) -> bool {
         self.encoded.is_ok()
+    }
+
+    /// Whether `cove_ir::verify` accepted the program. `false` for a
+    /// preparation that never asked, which only this crate's tests make.
+    pub(crate) fn is_verified(&self) -> bool {
+        self.verified
+    }
+
+    /// By function, the loads and stores through an address that may have
+    /// been loaded out of memory: `cove_ir::verify::places::loaded_uses` of
+    /// every function, which the native tier's subset asks too.
+    pub(crate) fn loaded_uses(&self) -> Arc<[Box<[usize]>]> {
+        Arc::clone(&self.agree.loaded)
     }
 }
 

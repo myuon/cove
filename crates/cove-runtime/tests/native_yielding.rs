@@ -760,8 +760,8 @@ impl Drop for Monitor {
 fn the_loops_are_compiled_and_the_entries_are_not() {
     let world = world();
     let native = world.native.native().expect("compiled");
-    let refused: Vec<&str> = native
-        .refusals()
+    let refusals = native.refusals();
+    let refused: Vec<&str> = refusals
         .iter()
         .map(|refused| refused.name.as_str())
         .collect();
