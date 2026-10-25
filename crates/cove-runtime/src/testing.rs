@@ -95,8 +95,10 @@ pub struct TestFailure {
 /// instead re-encodes the program per case, which measured 0.35 ms a case on
 /// a property whose body does nothing, against 0.003 ms on the interpreter.
 ///
-/// On [`TestBackend::Native`] the machine code is compiled here too, once per
-/// test, and every case of a property runs over the same table.
+/// On [`TestBackend::Native`] the tier's table is built here too, once per
+/// test, and every case of a property runs over the same table — which, under
+/// [`TierUp::AtCall`](crate::TierUp::AtCall), compiles each function once it is
+/// hot across them.
 pub struct PreparedTest {
     lowered: Option<PreparedProgram>,
 }

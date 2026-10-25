@@ -170,8 +170,10 @@ pub struct PreparedProgram {
     program: Arc<Program>,
     prepared: exec::Prepared,
     /// The program's machine code, when it was compiled with
-    /// [`PreparedProgram::with_native`]: compiled once, for every run built
-    /// from this preparation, on any thread ([ADR 0085]).
+    /// [`PreparedProgram::with_native`] or
+    /// [`PreparedProgram::with_native_tiered`]: one table, for every run built
+    /// from this preparation, on any thread ([ADR 0085]). A function is
+    /// compiled once, before the runs or when it becomes hot in one of them.
     ///
     /// [ADR 0085]: ../../../../docs/adr/0085-compiled-frames-resume-where-they-yielded.md
     native: Option<Arc<crate::native::NativeProgram>>,

@@ -7,26 +7,36 @@
 //! — and until [issue #369](https://github.com/myuon/cove/issues/369) nothing
 //! was, because the only caller was a comparison harness that built its own.
 //!
-//! This is that thing: one [`NativeProgram`] per lowered program, compiled
-//! eagerly, finalized once, and then immutable for the life of the run.
+//! This is that thing: one [`NativeProgram`] per lowered program, which
+//! compiles under a [`TierUp`] policy — every function before the run, or each
+//! function at the call that makes it hot ([ADR 0123]) — and keeps every
+//! function's code immutable from the moment it is made executable.
 //!
-//! # Why eagerly, and why one finalize
+//! # When a function is compiled
 //!
-//! ADR 0056 measured the template compiler at **5.4 µs a function**, and drew the
-//! consequence itself: "which makes ADR 0055's 'compile every supported reachable
-//! function eagerly' cheap enough not to need a hotness counter — a thousand
-//! functions is five milliseconds". So there is no hotness counter here, no
-//! on-stack replacement and no deoptimization, which is ADR 0055's "Compile
-//! functions, not traces" taken literally.
+//! ADR 0056 measured the template compiler at **5.4 µs a function** and drew
+//! the consequence that compiling every reachable function eagerly needed no
+//! hotness counter. [Issue #713](https://github.com/myuon/cove/issues/713)
+//! measured what eager compilation cost on the default tier: once a duplicated
+//! `cove_ir::verify` and a duplicated loaded-address analysis were taken out,
+//! still 33–57 µs a function, most of it emitting and mapping code for
+//! functions that ran once or never — 46% of what `cove test` compiled was never
+//! called. So a run the default put on the tier compiles a function at its
+//! [`HOT_CALLS`]th call, and a function with a loop at its first, because there
+//! is no on-stack replacement: a call that is already running finishes on the
+//! tier it began on. [ADR 0123] has the measurements.
 //!
-//! One finalize matters more than it looks. A mapping is writable *or*
-//! executable and never both, and the template compiler's `Jit::finalize` is the
-//! flip — named without a link, because it exists only under a code generator's
-//! feature and an intra-doc link to an item a default build does not have is a
-//! broken link. Compiling on first call would mean flipping a page while Cove
-//! frames stand on it, so everything is compiled before the first entry and
-//! nothing is compiled after — which is also why a run cannot "rebuild or
-//! refinalize the JIT", a property issue #369 asks for in as many words.
+//! # One mapping per function, and when it is flipped
+//!
+//! A mapping is writable *or* executable and never both, and the template
+//! compiler's `Jit::finalize` is the flip — named without a link, because it
+//! exists only under a code generator's feature and an intra-doc link to an item
+//! a default build does not have is a broken link. Every function has a mapping
+//! of its own, so compiling one while others run writes only pages nothing has
+//! entered, and flips only those: no page is ever made writable again while a
+//! Cove frame stands on it, and a run never "rebuilds or refinalizes the JIT",
+//! the property issue #369 asks for in as many words. An eager table compiles
+//! everything and finalizes once, before the first entry.
 //!
 //! # What a refusal is, and what it is not
 //!
@@ -45,6 +55,7 @@
 //! figure covering both would hide which.
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+//! [ADR 0123]: ../../../docs/adr/0123-the-native-tier-compiles-what-is-hot.md
 
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -512,11 +523,16 @@ pub(crate) fn compile_prepared(
 /// The program a table is compiled from: borrowed for an eager table, which
 /// never reads it again, and shared for one that compiles as functions become
 /// hot.
+///
+/// Read only by the code generator's half, so a build without one reads none
+/// of it.
+#[cfg_attr(not(feature = "template"), allow(dead_code))]
 enum Source<'p> {
     Borrowed(&'p Program),
     Shared(Arc<Program>),
 }
 
+#[cfg_attr(not(feature = "template"), allow(dead_code))]
 impl Source<'_> {
     fn program(&self) -> &Program {
         match self {
