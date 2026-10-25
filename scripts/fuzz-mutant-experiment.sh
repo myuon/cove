@@ -81,6 +81,28 @@ dedicated gc_roots cargo test --profile checked -p cove-fuzz --features template
 dedicated template cargo test --profile checked -p cove-native --features template --test template
 dedicated native_tier cargo test --profile checked -p cove-runtime --features template --test native_tier
 
+# Replays `$2` through target `$1` with the mutant's build: the JSON to
+# `$3.json`, the findings to `$3.txt`. A replay the process does not survive
+# — an abort, a fault, which the catch-all of `cove-fuzz stats` cannot count —
+# is made again one input at a time, and an input that kills its process is a
+# finding too.
+replay_dir() {
+  local t="$1" dir="$2" to="$3" status=0 s f
+  "$wt/target/checked/cove-fuzz" stats "$t" "$dir" > "$to.json" 2> "$to.txt" || status=$?
+  if [ "$status" -gt 1 ]; then
+    : > "$to.txt"
+    while IFS= read -r -d '' f; do
+      s=0
+      "$wt/target/checked/cove-fuzz" stats "$t" "$f" > /dev/null 2> "$out/one.txt" || s=$?
+      if [ "$s" -gt 1 ]; then
+        echo "finding: $f: the process died (status $s): $(grep -m1 -E 'panicked|Abort|fault|error' "$out/one.txt" | cut -c1-160)" >> "$to.txt"
+      else
+        grep '^finding: ' "$out/one.txt" >> "$to.txt" || true
+      fi
+    done < <(find "$dir" -type f -not -name '*.md' -not -name '.*' -print0 | sort -z)
+  fi
+}
+
 # 2. Corpus replay, with the mutant's build.
 "$m" run "$mutant" -- cargo build --profile checked -p cove-fuzz --features template --quiet
 found="$out/found.txt"
@@ -90,23 +112,7 @@ for spec in "${replays[@]}"; do
   [ -d "$dir" ] || continue
   tag="$(echo "$dir" | sed "s|$root/||; s|/|_|g")"
   start=$(date +%s)
-  status=0
-  "$wt/target/checked/cove-fuzz" stats "$t" "$dir" > "$out/replay-$t-$tag.json" 2> "$out/replay-$t-$tag.txt" || status=$?
-  # A replay the process itself did not survive — an abort, a fault: the
-  # catch-all of `cove-fuzz stats` cannot count those, so each input is
-  # replayed alone and one that kills its process is a finding too.
-  if [ "$status" -gt 1 ]; then
-    : > "$out/replay-$t-$tag.txt"
-    while IFS= read -r -d '' f; do
-      s=0
-      "$wt/target/checked/cove-fuzz" stats "$t" "$f" > /dev/null 2> "$out/one.txt" || s=$?
-      if [ "$s" -gt 1 ]; then
-        echo "finding: $f: the process died (status $s): $(grep -m1 -E 'panicked|Abort|fault|error' "$out/one.txt" | cut -c1-160)" >> "$out/replay-$t-$tag.txt"
-      else
-        grep '^finding: ' "$out/one.txt" >> "$out/replay-$t-$tag.txt" || true
-      fi
-    done < <(find "$dir" -type f -not -name '*.md' -not -name '.*' -print0 | sort -z)
-  fi
+  replay_dir "$t" "$dir" "$out/replay-$t-$tag"
   n=$(grep -c '^finding: ' "$out/replay-$t-$tag.txt" || true)
   inputs=$(find "$dir" -type f -not -name '*.md' -not -name '.*' | wc -l | tr -d ' ')
   grep '^finding: ' "$out/replay-$t-$tag.txt" | sed 's/^finding: //; s/: .*//' >> "$found" || true
@@ -130,7 +136,7 @@ for spec in ${explores[@]+"${explores[@]}"}; do
     fi
   done < "$found"
   # And anything in the starting corpus that finds it on its own.
-  "$wt/target/checked/cove-fuzz" stats "$t" "$start_corpus" > /dev/null 2> "$out/explore-start-$t.txt" || true
+  replay_dir "$t" "$start_corpus" "$out/explore-start-$t"
   while IFS= read -r f; do
     rm -f "$f"
     removed=$((removed + 1))
