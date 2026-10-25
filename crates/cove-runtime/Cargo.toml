@@ -43,3 +43,11 @@ cove-native.workspace = true
 cove-schema.workspace = true
 cove-syntax.workspace = true
 cove-sema.workspace = true
+
+[dev-dependencies]
+# Generators and shrinking for `tests/std_laws.rs`, the standard library's
+# round-trip and law claims run as properties (issue #679). Without the
+# default features: `fork` and `timeout` run a case in a child process, which
+# these do not need. Every run is seeded by the test itself, never by the
+# environment or a persistence file.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
