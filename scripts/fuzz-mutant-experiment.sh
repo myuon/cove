@@ -148,7 +148,9 @@ for spec in ${explores[@]+"${explores[@]}"}; do
     res="$out/explore-$t/run-$r/result.txt"
     if [ -f "$res" ]; then
       first=$(grep 'first finding' "$res" | sed 's/.*after: //' || true)
-      say "explore $t seed $r: ${first:+DETECTED after $first}${first:-not detected in ${seconds}s} ($(grep '^wall' "$res"), $(grep '^executions' "$res" | sed 's/ (.*)//'))"
+      verdict="not detected in ${seconds}s"
+      if [ -n "$first" ]; then verdict="DETECTED after $first"; fi
+      say "explore $t seed $r: $verdict ($(grep '^wall' "$res"), $(grep '^executions' "$res" | sed 's/ (.*)//'))"
       a=$(find "$out/explore-$t/run-$r/artifacts" -type f | head -1)
       if [ -n "$a" ]; then
         "$wt/target/checked/cove-fuzz" stats "$t" "$a" 2>&1 >/dev/null | grep '^finding' | cut -c1-300 >> "$report" || true

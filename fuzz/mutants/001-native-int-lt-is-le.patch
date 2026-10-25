@@ -1,9 +1,10 @@
 # 001-native-int-lt-is-le
 #
-# Native code answers `a < b` on `Int` (and `Bool`, tags) as `a <= b`.
-# Only the stored-answer form: a comparison fused with its branch is
-# emitted elsewhere and is untouched, so loops still end. Wrong only
-# when the two operands are equal.
+# Native code answers `a < b` on `Int` (and `Bool`, tags) as `a <= b`,
+# in every form the template emits through `Emit::compare`: the
+# stored answer, the immediate form, and the comparison fused with its
+# branch. Wrong only when the two operands are equal — which every
+# counted loop's last test is.
 #
 # An artificial defect for measuring the fuzzing harness (issue 681).
 # Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
