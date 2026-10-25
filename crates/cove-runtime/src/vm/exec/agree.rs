@@ -53,6 +53,13 @@ pub(crate) struct Agree {
     unit: Option<(u32, u64)>,
 }
 
+/// One `AddrOfField`'s need: `(word offset, repr, written)`, in offset order.
+type Need = Box<[(u32, Repr, bool)]>;
+
+/// One closure call that hands an address: its pc, and the callees it was
+/// verified as calling.
+type ClosureCall = (usize, Box<[cove_ir::FunctionId]>);
+
 /// What a word may be read and written as, built once per program: every
 /// layout's [`Agree`], and every `AddrOfField`'s need.
 #[derive(Debug, Default)]
@@ -62,7 +69,7 @@ pub(crate) struct Tables {
     /// By function and pc, for each [`cove_ir::Inst::AddrOfField`]: what the
     /// address it forms is used as — `cove_ir::verify::places::field_needs` —
     /// as `(word offset, repr, written)`.
-    places: Box<[Box<[Option<Box<[(u32, Repr, bool)]>>]>]>,
+    places: Box<[Box<[Option<Need>]>]>,
     /// By function, which slots of its frame are addresses: what a collection
     /// reads to keep an object a frame holds the address of a field of.
     pub(crate) addrs: Box<[cove_ir::RefMap]>,
@@ -75,7 +82,7 @@ pub(crate) struct Tables {
     /// By function, the closure calls that hand an address and the callees
     /// each was verified as calling, by pc ascending —
     /// `cove_ir::verify::places::closure_callee_table`.
-    closures: Box<[Box<[(usize, Box<[cove_ir::FunctionId]>)]>]>,
+    closures: Box<[Box<[ClosureCall]>]>,
     /// By function, the loads and stores through an address that may have
     /// been loaded out of memory, by pc ascending —
     /// `cove_ir::verify::places::loaded_uses` — which

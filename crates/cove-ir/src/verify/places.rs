@@ -17,7 +17,7 @@
 //!   it names. It may not be answered, captured, boxed, stored through another
 //!   address, handed to a closure, a host or a task, or allocated into an
 //!   object — every one of those keeps the place past the frame it is in. (A
-//!   heap payload holding one is refused by [`super::layouts`].)
+//!   heap payload holding one is refused by `verify`'s layouts pass.)
 //! - **Every place formed has a *need***: for every word offset from it, the
 //!   `Repr` read or written there and whether it is written. The formation is
 //!   an instruction that writes an address slot — the address of a slot, of a

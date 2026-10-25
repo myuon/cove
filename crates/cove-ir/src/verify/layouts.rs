@@ -39,6 +39,9 @@ use crate::layout::{Layout, LayoutId, Shape};
 use crate::program::Program;
 use crate::repr::Repr;
 
+/// A program-wide layout: its field's name, its id, and the shape it must be.
+type Want<'a> = (&'a str, LayoutId, fn(&Shape) -> bool);
+
 /// Every disagreement between a layout's shape and its words, or nothing.
 pub(super) fn check(program: &Program) -> Vec<Invalid> {
     let mut faults = Vec::new();
@@ -164,7 +167,7 @@ pub(super) fn check(program: &Program) -> Vec<Invalid> {
             ),
         );
     }
-    let wants: [(&str, LayoutId, fn(&Shape) -> bool); 5] = [
+    let wants: [Want; 5] = [
         ("str_layout", program.str_layout, |s| *s == Shape::Str),
         ("bytes_layout", program.bytes_layout, |s| *s == Shape::Bytes),
         ("buffer_layout", program.buffer_layout, |s| {

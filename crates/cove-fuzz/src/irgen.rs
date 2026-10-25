@@ -22,14 +22,14 @@
 //! holds, an index is whatever the `Int` slot holds. Those are the machine's
 //! questions, at run time, and asking them is what the target is for.
 //!
-//! Now and then — [`Gen::wild`] — an operand is chosen with no regard to what
+//! Now and then — `Gen::wild` — an operand is chosen with no regard to what
 //! the instruction needs, so that the refusals are exercised too.
 //!
 //! # Every instruction
 //!
 //! [`Kind`] names every [`Inst`] variant, and [`kind_of`] maps an instruction
 //! to its kind with no wildcard arm: a new instruction does not compile until
-//! it is given a kind, and [`Body::emit`] does not compile until the kind has
+//! it is given a kind, and `Body::emit` does not compile until the kind has
 //! a way to be generated. `tests/regressions.rs` holds a fixed set of inputs
 //! to reaching every kind, and to a share of programs that verify.
 //!
@@ -394,7 +394,7 @@ pub const KINDS: [Kind; 87] = [
 ];
 
 /// The kind of `inst`. No wildcard arm: a new [`Inst`] variant is a compile
-/// error here until it is given a [`Kind`], and then one in [`Body::emit`]
+/// error here until it is given a [`Kind`], and then one in `Body::emit`
 /// until it is generated.
 pub fn kind_of(inst: &Inst) -> Kind {
     match inst {
@@ -530,7 +530,7 @@ pub struct Gen<'a> {
     /// `Shape::Vector` layouts and their elements: a word `GrowableAlloc`
     /// allocates the vector its element has.
     vectors: Vec<(LayoutId, LayoutId)>,
-    /// See [`Gen::wild`].
+    /// See `Gen::wild`.
     wild_programs: bool,
 }
 

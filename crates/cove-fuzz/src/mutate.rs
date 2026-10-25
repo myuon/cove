@@ -364,7 +364,7 @@ impl Edit<'_, '_> {
         let at = self.below(ops.len());
         let choice = self.byte();
         let pick = |edit: &mut Self, was: u32, len: usize| -> u32 {
-            if choice % 7 == 0 {
+            if choice.is_multiple_of(7) {
                 edit.index_near(was, len)
             } else {
                 edit.below(len.max(1)) as u32
@@ -568,7 +568,7 @@ impl Edit<'_, '_> {
             return;
         };
         let other = self.below(self.program.functions[f].code.len());
-        let remove = self.byte() % 4 == 0;
+        let remove = self.byte().is_multiple_of(4);
         let function = &mut self.program.functions[f];
         if remove && function.code.len() > 1 {
             function.code.remove(pc);

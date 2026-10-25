@@ -543,7 +543,7 @@ pub fn stats(count: u64) -> String {
     }
     let _ = writeln!(out, "the most common refusals:");
     let mut rows: Vec<_> = refusals.into_iter().collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
     for (rule, n) in rows.iter().take(15) {
         let _ = writeln!(out, "  {n:6} {rule}");
     }

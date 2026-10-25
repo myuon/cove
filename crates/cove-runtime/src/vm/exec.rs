@@ -4504,6 +4504,24 @@ impl<'a> Machine<'a> {
         let segment = segment
             .map_err(|NoSegment| no_segment_left().at(span).with_rule(crate::budget::RULE))?;
 
+        // The body's answer is written into a box of `answer`'s width, so the
+        // body has to answer that (ADR 0120): the closure's function is a word
+        // of an object, and the `spawn` names the layout on its own.
+        let callee = self.callee_of(object).map_err(|error| error.at(span))?;
+        let returns = self.program.function(callee).returns;
+        let layouts = &self.program.layouts;
+        let words = |id: LayoutId| layouts.get(id.index()).map(|layout| &layout.words);
+        if words(returns) != words(answer) {
+            return Err(RuntimeError::new(format!(
+                "this spawns `{}` as a task answering a `{}`, and it answers a `{}`",
+                self.program.function(callee).qualified(),
+                self.program.layout(answer).name,
+                self.program.layout(returns).name
+            ))
+            .with_rule("A task is spawned as what its body answers.")
+            .at(span));
+        }
+
         // Then the answer's home, allocated before the thread exists so that
         // it is a root of this task from the moment it can hold anything. The
         // closure is in a `Repr::Ref` slot of a live frame, so a collection
@@ -4683,6 +4701,22 @@ impl<'a> Machine<'a> {
         self.join(at, running);
         match &self.children[at].state {
             ChildState::Settled => {
+                // A task handle is one word with no layout, so the `await`
+                // names the answer's layout and the task holds its own
+                // (ADR 0120): they are held to each other word for word, or
+                // the await would read the task's answer box at another width.
+                let held = self.children[at].layout;
+                let layouts = &self.program.layouts;
+                let words = |id: LayoutId| layouts.get(id.index()).map(|layout| &layout.words);
+                if words(held) != words(answer) {
+                    return Err(RuntimeError::new(format!(
+                        "this awaits a task as a `{}`, and the task answers a `{}`",
+                        self.program.layout(answer).name,
+                        self.program.layout(held).name
+                    ))
+                    .with_rule("A task is awaited as what its body answers.")
+                    .at(span));
+                }
                 let width = self.width(answer);
                 let home = self.children[at].answer;
                 Ok(self.mem.read_words(self.mem.payload_addr(home, 1), width))
