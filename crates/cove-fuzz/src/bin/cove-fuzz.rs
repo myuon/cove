@@ -10,8 +10,11 @@
 //! cove-fuzz explain FILE...                                how a source ends on each tier
 //! cove-fuzz explain-generated FILE...                      the same, for the program FILE generates
 //! cove-fuzz image-seed OUT_DIR FILE...                     write image bodies of sources
-//! cove-fuzz stats <differential|differential_source> PATH... replay a corpus and count what it compared (issue 704)
+//! cove-fuzz stats <TARGET> PATH...                         replay a corpus and count what it compared (issue 704);
+//!                                                          TARGET is differential, differential_source, ir, ir_mutate or image
 //! cove-fuzz stats merge PATH...                            add together the files a session wrote
+//! cove-fuzz coverage <TARGET> PATH...                      replay a corpus and count which instructions its programs
+//!                                                          held and which they executed (issue 705), same TARGETs
 //! ```
 
 use std::path::Path;
@@ -153,6 +156,29 @@ fn main() -> ExitCode {
             }
             if !findings.is_empty() {
                 return ExitCode::FAILURE;
+            }
+        }
+        // Which instructions a corpus held and which it executed (issue 705):
+        // the JSON on stdout, the table on stderr. A dedicated replay, because
+        // it watches every instruction.
+        "coverage" => {
+            let Some((target, paths)) = rest.split_first() else {
+                eprintln!(
+                    "usage: cove-fuzz coverage <{}> FILE_OR_DIR...",
+                    cove_fuzz::coverage::TARGETS.join("|")
+                );
+                return ExitCode::from(2);
+            };
+            let paths: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
+            match cove_fuzz::coverage::replay(target, &paths) {
+                Ok(stats) => {
+                    print!("{}", stats.to_json());
+                    eprint!("{}", cove_fuzz::coverage::summary(&stats));
+                }
+                Err(why) => {
+                    eprintln!("{why}");
+                    return ExitCode::from(2);
+                }
             }
         }
         "explain" => {

@@ -191,6 +191,7 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
             runs: Report {
                 observed: vec![vm],
                 skipped: Vec::new(),
+                pairs: Vec::new(),
                 mismatch,
                 native: None,
             },
@@ -279,12 +280,14 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
             Err(why) => mismatch = Some(format!("the program's image does not read back: {why}")),
         },
     }
-    let mismatch = mismatch.or_else(|| differential::first_mismatch(&observed));
+    let (pairs, first) = differential::compare_all(&observed);
+    let mismatch = mismatch.or(first);
     IrReport {
         verified,
         runs: Report {
             observed,
             skipped,
+            pairs,
             mismatch,
             native: summary,
         },
@@ -314,23 +317,29 @@ fn machine_run(
     let collections = vm.collections();
     let native_calls = vm.tiers().native();
     let under_compiled = vm.collections_while_compiled();
+    let instructions = vm.instructions();
     drop(vm);
     let mut observed = differential::observe(mode, answer, &out, &err);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
     observed.collections_while_compiled = Some(under_compiled);
+    observed.instructions = Some(instructions);
     observed
 }
 
-/// Panics with the program and every run if `report` is a finding.
-pub(crate) fn require(subject_listing: impl FnOnce() -> String, report: &IrReport) {
-    if let Some(why) = &report.runs.mismatch {
-        panic!(
+/// The message a finding panics with — the program and every run — if
+/// `report` is one.
+pub(crate) fn finding(
+    subject_listing: impl FnOnce() -> String,
+    report: &IrReport,
+) -> Option<String> {
+    report.runs.mismatch.as_ref().map(|why| {
+        format!(
             "{why}\n--- program ---\n{}--- runs ---\n{}",
             subject_listing(),
             report.describe()
-        );
-    }
+        )
+    })
 }
 
 /// The program as a person reads it: [`cove_ir::print`]'s listing where it
@@ -351,10 +360,61 @@ pub fn listing(program: &Program) -> String {
 /// On a finding: two modes that disagree, or a refused program the machine
 /// ran — with the program and every run.
 pub fn ir(data: &[u8]) {
+    let (classification, finding) = ir_classified(data);
+    crate::stats::record(&classification, finding.is_some());
+    if let Some(why) = finding {
+        panic!("{why}");
+    }
+}
+
+/// [`ir`](fn@ir) without the panic: the input's classification, and the
+/// message it would have panicked with if it is a finding. For `ir` itself and
+/// for `cove-fuzz stats`.
+pub fn ir_classified(data: &[u8]) -> (crate::stats::Classification, Option<String>) {
     let subject = crate::irgen::from_bytes(data);
+    classified("ir", subject)
+}
+
+/// `subject` run in every mode, classified, with the finding's message.
+fn classified(
+    target: &'static str,
+    subject: Subject,
+) -> (crate::stats::Classification, Option<String>) {
     let listed = subject.program.clone();
+    let front = crate::stats::Front {
+        verified: false,
+        has_entry: subject
+            .program
+            .function_named(&subject.module, &subject.name)
+            .is_some(),
+    };
     let report = run(subject);
-    require(|| listing(&listed), &report);
+    let finding = finding(|| listing(&listed), &report);
+    (classify(target, &report, front), finding)
+}
+
+/// `report` classified for `target`.
+pub(crate) fn classify(
+    target: &'static str,
+    report: &IrReport,
+    front: crate::stats::Front,
+) -> crate::stats::Classification {
+    match &report.verified {
+        Ok(()) => crate::stats::classify(
+            target,
+            &report.runs,
+            crate::stats::Front {
+                verified: true,
+                ..front
+            },
+        ),
+        Err(why) => crate::stats::Classification::verify_refused(
+            target,
+            why,
+            Some(&report.runs),
+            report.runs.mismatch.is_some(),
+        ),
+    }
 }
 
 /// The `ir_mutate` target: the lowered program `data` carries as an image
@@ -365,12 +425,19 @@ pub fn ir(data: &[u8]) {
 ///
 /// As [`ir`](fn@ir).
 pub fn ir_mutate(data: &[u8]) {
-    let Some(subject) = crate::mutate::from_bytes(data) else {
-        return;
-    };
-    let listed = subject.program.clone();
-    let report = run(subject);
-    require(|| listing(&listed), &report);
+    let (classification, finding) = ir_mutate_classified(data);
+    crate::stats::record(&classification, finding.is_some());
+    if let Some(why) = finding {
+        panic!("{why}");
+    }
+}
+
+/// [`ir_mutate`] without the panic; see [`ir_classified`].
+pub fn ir_mutate_classified(data: &[u8]) -> (crate::stats::Classification, Option<String>) {
+    match crate::mutate::from_bytes(data) {
+        Some(subject) => classified("ir_mutate", subject),
+        None => (crate::stats::Classification::unreadable("ir_mutate"), None),
+    }
 }
 
 /// The subject a decoded image is: its entry, called with a plausible

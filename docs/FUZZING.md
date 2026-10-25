@@ -21,6 +21,9 @@ records the differential targets' rules ([below](#the-differential-targets)).
 | `fuzz/corpus/`, `fuzz/artifacts/`, `fuzz/logs/` | What a session makes. Ignored by git. |
 | `scripts/fuzz-seed-corpus.sh` | Builds `fuzz/corpus/<target>/` from the repository's programs and the seeds. |
 | `scripts/fuzz.sh` | Runs one target with the limits below. |
+| `scripts/fuzz-measure.sh`, `scripts/fuzz-measure-table.py` | Measures a target: N sessions of a fixed length and core budget from one starting corpus, counted, and tabulated ([Measuring a target](#measuring-a-target)). |
+| `crates/cove-fuzz/src/coverage.rs` | `cove-fuzz coverage`: which instructions a corpus held and which it executed. |
+| [`FUZZ_EVALUATION.md`](FUZZ_EVALUATION.md) | What the harness was measured to reach and detect, and how. |
 | `.github/workflows/fuzz.yml` | The pull-request smoke and the nightly run. |
 
 ## The targets
@@ -442,11 +445,29 @@ or `-jobs=N` is the way to spend more cores on it.
 A differential session that found nothing says as much as what it compared,
 and libFuzzer's own numbers — executions, coverage edges — do not say that. A
 program every mode stopped on before printing anything agrees trivially.
-So `differential` and `differential_source` classify every input, before
-they panic on it, and count ([issue #704](https://github.com/myuon/cove/issues/704);
+So the differential targets and the IR targets (`differential`,
+`differential_source`, `ir`, `ir_mutate`, `image`) classify every input,
+before they panic on it, and count ([issue #704](https://github.com/myuon/cove/issues/704);
 `crates/cove-fuzz/src/stats.rs` is the implementation and its module
 documentation the long form). The counts are kept apart — they overlap — and
 nothing here is a score.
+
+Four readings the numbers do **not** allow:
+
+- **`prefix` is not "invalid".** A program counts as `prefix` when *at least
+  one pair* of its modes was compared by prefix; every other pair of the same
+  program may have been compared in full. The `pairs` key says which.
+- **`full` is not "ran to completion".** A full comparison compares how two
+  runs ended, whatever that was: two runs that trapped at the same first
+  statement are compared in full. `pairs.<a|b>.full.<kind>` and
+  `comparisons.full_success` say how the runs ended.
+- **Native execution and a collection under a compiled frame are not a
+  tested root.** They say compiled code ran and the collector asked a compiled
+  frame for its roots; not that a reference was live across the collection or
+  read after it. [Roots of compiled frames](#roots-of-compiled-frames) is the
+  test for that.
+- **Executions are not coverage of the input space.** A session counts every
+  execution, the corpus's re-runs and repeated inputs included.
 
 ### The metrics
 
@@ -462,14 +483,44 @@ nothing here is a score.
 | `comparisons.empty_prefix` | of `prefix`, programs whose **every** prefix-compared pair had an **empty common prefix**: a pair compared by prefix checks that the shorter of each console stream is a prefix of the longer, so what it compares is the shorter stdout and the shorter stderr, and its common prefix is empty when both are empty — it compared no output at all |
 | `comparisons.pairs_full`, `pairs_prefix`, `pairs_empty_prefix` | the same, counted in pairs of modes rather than programs |
 | `comparisons.{full,prefix}_with_native`, `…_with_gc_while_compiled` | the `full` or `prefix` programs that also count under the `programs` key of that name |
+| `comparisons.full_success`, `full_success_with_native` | of `full`, the programs every one of whose runs ended in **success** — `RunOutcome::Success`, the entry returning a value that is not an `Err` — and of those, the ones whose `native` mode entered compiled code: the only full comparisons in which every mode ran the program to its end |
+| `pairs.<a\|b>` | per pair of modes, named in the order the modes are declared (`ast`, `vm`, `native`, `vm-gc`, `native-gc`, `image`, `vm-again`), whichever ran first: `full.<kind>` — compared in full, by how both runs ended: `success`, `error` (the entry returned `Err`), `trap` (`RunOutcome::Invariant` other than the heap running out), `limit` (out of memory on a shared heap, the host-call, concurrency or call-depth limit, the deadline), `other` (a refused host call, cancellation), or `mixed` when the two ended in different kinds, which is always also a disagreement; `full_success_with_native`, compared in full, both succeeded, and one of the two entered compiled code; `prefix.nonempty` and `prefix.empty`; `skipped.<reason>`, one of the two did not run; `no_entry`; `mismatch`, the two disagreed. Each count is read from the comparison the harness made — `differential::compare_pair` decides both the verdict and the basis, and the report keeps every pair's — so the statistics cannot count a different comparison from the one that was made |
+| `stages.started`, `not_started.<reason>` | the `vm` run executed an instruction (`OwnedVm::instructions() > 0`): the entry and its arguments were accepted and the run began; otherwise the error's first sentence, numbers and names left out |
+| `stages.built`, `stages.verified`, `stages.entry`, `stages.ran`, `refusals.<rule>` | **the IR targets' stages**, in place of the front end's: `built`, the input made a program (generated by `ir`; decoded by `image`; decoded and edited by `ir_mutate` — an input that does not decode counts under none); `verified`, `cove_ir::verify` accepted it, and `refusals.<rule>` the rule it refused by otherwise (the machine is held to refusing it too in `ir` and `ir_mutate`; `image` does not run it); `entry`, the program has the function it is entered by; `ran`, every mode ran and was compared |
 | `programs.native_ran` | the `native` mode entered compiled code (`native_calls > 0`); without that, `native` compared the encoded VM with itself |
 | `programs.vm_gc_collected`, `native_gc_collected` | that mode collected at least once |
 | `programs.gc_while_compiled` | some mode collected **while a compiled frame was on the stack** — `OwnedVm::collections_while_compiled`, a runtime counter — which is what tests a compiled frame's roots. A run that collected and ran compiled code at different moments did not. `collections_while_compiled` is the number of such collections, summed |
-| `modes.<mode>` | per mode: `ran`; `ended.<outcome>` for runs that did not stop, by `RunOutcome` name (`success`; `error`, the entry returned `Err`; `invariant`, a trap; …); `stopped.<reason>`; `skipped.<reason>`; `entered_compiled_code`, `collected`, `collected_while_compiled` |
+| `modes.<mode>` | per mode: `ran`; `ended.<outcome>` for runs that did not stop, by `RunOutcome` name (`success`; `error`, the entry returned `Err`; `invariant`, a trap; …); `stopped.<reason>`; `end.<kind>`, the five kinds of `pairs`; `started`; `skipped.<reason>`; `entered_compiled_code`, `collected`, `collected_while_compiled` |
 
 The file is JSON: objects, with non-negative integers at the leaves; two files
-merge by adding leaf to leaf. The IR targets (`ir`, `ir_mutate`, `image`) are
-not counted yet; they can be, as new keys in the same tree.
+merge by adding leaf to leaf. Every key of the first version (#717) means what
+it meant; the rest are new keys in the same tree, so an old file merges with a
+new one and the new keys read nought in it — which is "not counted", not
+"none".
+
+**What a program holds is not what it executes.** `stages.verified` and
+`ir-stats`' kinds say which instructions a program *contains*; one after a
+trap, behind a loop that never ends or in a function nobody calls never runs.
+`cove-fuzz coverage <target> PATH...` measures the second thing, on a replay
+of its own because it watches every instruction (`crates/cove-fuzz/src/coverage.rs`):
+for each program that verifies, every instruction it holds is counted under
+its kind — with the operation for arithmetic and comparisons, `Arith.Int.Mul`,
+`Cmp.Int.Lt` — as `present`, and again as `present_compiled` if it is in a
+function the native tier compiles; then the program runs on the encoded VM
+with a debugger that records every instruction it executes, halted at the
+count the unwatched run reached, and those are `executed`, and
+`executed_compiled` when the function is compiled and is not the entry (the
+outermost frame always runs encoded). For the instructions whose answer a
+plausible wrong implementation would get wrong only in one state, it also reads
+the operands (up to 256 times a site) and counts `<key>:<state>` as
+`triggered` and `triggered_compiled`: `Cmp.Int.<op>:equal`, two equal
+operands, where `<` and `<=` differ; `Arith.Int.<op>:overflow` and
+`ArithImm.<op>:overflow`, an addition, subtraction or multiplication whose
+exact answer is not an `Int`, where checking and wrapping differ. The counts
+are of programs. What it
+cannot see is compiled code itself: `executed_compiled` is the inference that
+the native modes ran, as machine code, what the VM ran in a function the tier
+compiled.
 
 The runtime counter costs one add and one subtract each time Rust enters
 compiled code (`run_frame`, the one body every such entry goes through) and
@@ -480,7 +531,7 @@ directly pays nothing, and the dispatch loop is untouched.
 
 **In a session.** Set `COVE_FUZZ_STATS_DIR`, and every process the target runs
 in writes `$COVE_FUZZ_STATS_DIR/<target>-<pid>.json` after its first input,
-every 256 inputs, at least every ten seconds, and before an input that is
+every 256 inputs, at least every second, and before an input that is
 about to panic — by a temporary file and a rename, so a reader never sees half
 a file. It is written as it goes because libFuzzer does not promise to run
 anything at exit and kills a `-fork` child. Unset, nothing is counted and no
@@ -492,10 +543,14 @@ $ cargo run --profile checked -p cove-fuzz --features template -- stats merge fu
 ```
 
 A session counts **executions**: libFuzzer runs its corpus first, and each
-`-fork` child runs part of it again, so an input is counted every time it runs.
+`-fork` child runs part of it again, so an input is counted every time it runs
+— which is why a session's count exceeds the executions libFuzzer's own
+progress line reports. A `-fork` child killed between two writes loses at most
+a second of counts; at ten seconds, as #717 first wrote them, a 20-second
+`-fork=2` session counted 12 of libFuzzer's 240 executions.
 
-**Over a corpus.** `cove-fuzz stats <differential|differential_source> PATH...`
-replays every file under the paths once — directories recursively, `*.md` and
+**Over a corpus.** `cove-fuzz stats <target> PATH...`, for any of the five
+targets, replays every file under the paths once — directories recursively, `*.md` and
 dot-files left out — and counts it, a finding included, without stopping. It
 prints the JSON on stdout and the summary on stderr, lists each finding, and
 exits non-zero if there was one.
@@ -510,7 +565,29 @@ The summary leads with one sentence:
 N programs compared in full, M of them with native execution, K with a collection while compiled code was live; P prefix-only, Q of those with an empty common prefix (Q/P); … mismatches and … crashes over … inputs.
 ```
 
-### What they say
+### Measuring a target
+
+`scripts/fuzz-measure.sh <target> <seconds> --runs N --fork F` is the
+measurement the numbers below are made with, so that two of them can be
+compared: N sessions of the same length and core budget (`-fork=F`), each from
+a fresh copy of the same starting corpus — the one `scripts/fuzz-seed-corpus.sh`
+makes, or `--corpus DIR` — with libFuzzer seeds 1 to N, counted in session and
+merged. It builds without AddressSanitizer unless given `--asan` (a count and
+a disagreement are not memory-safety questions, and the build without it is
+several times faster), and writes everything under `fuzz/measure/`, which is
+not committed: `meta.txt` with the revision, the tree's state, the
+toolchains, the host, the load average and each session's exact command line;
+per session `session.json` and its summary, `result.txt` (wall time,
+executions, findings), libFuzzer's log and any finding. `--replay` counts each
+session's grown corpus as well, once an input; `--until-finding` stops a
+session at its first finding and records when, which is the mutation
+experiments' time-to-detection ([FUZZ_EVALUATION.md](FUZZ_EVALUATION.md)).
+
+```console
+$ scripts/fuzz-measure.sh differential 300 --runs 3 --fork 4 --replay
+```
+
+### The native tier on the command line
 
 `--features template` matters on the command line above: `-p cove-fuzz` alone
 is not a workspace build, so without it nothing turns the native tier on, and

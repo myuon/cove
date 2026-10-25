@@ -23,7 +23,9 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-corpus=fuzz/corpus
+# `COVE_FUZZ_CORPUS_DIR` puts the corpora somewhere else: scripts/fuzz-measure.sh
+# builds a starting corpus of its own with it.
+corpus="${COVE_FUZZ_CORPUS_DIR:-fuzz/corpus}"
 
 if [ $# -eq 0 ]; then
   set -- parse compile run structured image differential differential_source ir ir_mutate

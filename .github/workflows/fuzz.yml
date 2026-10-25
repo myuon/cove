@@ -99,13 +99,13 @@ jobs:
       - name: Seed the corpus
         run: scripts/fuzz-seed-corpus.sh ${{ matrix.target }}
 
-      # The differential targets count what each input compared (issue 704,
-      # docs/FUZZING.md "What a session compared"): every process libFuzzer
-      # starts writes its counts to this directory as it goes. Empty for the
-      # other targets, which is the same as unset.
+      # The differential and IR targets count what each input compared (issues
+      # 704 and 705, docs/FUZZING.md "What a session compared"): every process
+      # libFuzzer starts writes its counts to this directory as it goes. Empty
+      # for the other targets, which is the same as unset.
       - name: Fuzz
         env:
-          COVE_FUZZ_STATS_DIR: ${{ startsWith(matrix.target, 'differential') && format('{0}/fuzz/stats/session', github.workspace) || '' }}
+          COVE_FUZZ_STATS_DIR: ${{ contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target) && format('{0}/fuzz/stats/session', github.workspace) || '' }}
         run: |
           case "${{ github.event_name }}" in
             pull_request) seconds=60; extra=() ;;
@@ -123,7 +123,7 @@ jobs:
       # says what it had compared; and never failing the job itself, which is
       # the fuzz step's to fail.
       - name: Count what was compared
-        if: always() && startsWith(matrix.target, 'differential')
+        if: always() && contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target)
         continue-on-error: true
         timeout-minutes: 20
         run: |
@@ -145,12 +145,24 @@ jobs:
             ./target/checked/cove-fuzz stats "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" \
               2>&1 > fuzz/stats/corpus.json || true
             echo '```'
+            # Which instructions the corpus executed, and not only held
+            # (issue 705): a replay that watches every instruction, so the
+            # nightly run only.
+            if [ "${{ github.event_name }}" != pull_request ]; then
+              echo
+              echo "### Instructions the corpus held and executed"
+              echo
+              echo '```'
+              ./target/checked/cove-fuzz coverage "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" \
+                2>&1 > fuzz/stats/coverage.json || true
+              echo '```'
+            fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The counts are uploaded on every run, pass or fail, so a run that
       # found nothing still says what it compared. Counts only: no input.
       - name: Upload the counts
-        if: always() && startsWith(matrix.target, 'differential')
+        if: always() && contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target)
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-stats-${{ matrix.target }}-${{ github.run_id }}
