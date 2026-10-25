@@ -74,6 +74,7 @@ use cove_runtime::{
 };
 use cove_sema::{Compiler, Config, HostSchemas, Module, Package, Unit};
 
+pub mod coverage;
 pub mod differential;
 pub mod generate;
 pub mod ir;
@@ -241,19 +242,45 @@ pub fn structured(data: &[u8]) {
 ///
 /// On a finding, as [`ir`](fn@ir) does.
 pub fn image(data: &[u8]) {
+    let (classification, finding) = image_classified(data);
+    stats::record(&classification, finding.is_some());
+    if let Some(why) = finding {
+        panic!("{why}");
+    }
+}
+
+/// [`image`] without the panic: the input's classification, and the message
+/// it would have panicked with if it is a finding. A program `verify` refuses
+/// is counted as refused and not run, as it always was here.
+pub fn image_classified(data: &[u8]) -> (stats::Classification, Option<String>) {
+    const TARGET: &str = "image";
     let bytes = with_header(data);
     on_stack(move || {
         let Ok(image) = cove_ir::serial::decode(&bytes) else {
-            return;
+            return (stats::Classification::unreadable(TARGET), None);
         };
-        if cove_ir::verify(&image.program).is_err() {
-            return;
+        if let Err(faults) = cove_ir::verify(&image.program) {
+            let why = faults
+                .first()
+                .map_or_else(|| "refused".to_string(), ToString::to_string);
+            return (
+                stats::Classification::verify_refused(TARGET, &why, None, false),
+                None,
+            );
         }
         let subject = ir::image_subject(image);
         let listed = subject.program.clone();
+        let front = stats::Front {
+            verified: true,
+            has_entry: subject
+                .program
+                .function_named(&subject.module, &subject.name)
+                .is_some(),
+        };
         let report = ir::run_here(subject);
-        ir::require(|| ir::listing(&listed), &report);
-    });
+        let finding = ir::finding(|| ir::listing(&listed), &report);
+        (ir::classify(TARGET, &report, front), finding)
+    })
 }
 
 /// `data` behind a header this build's `decode` accepts.

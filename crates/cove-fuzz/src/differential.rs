@@ -167,6 +167,12 @@ impl Mode {
         }
     }
 
+    /// Where the mode sorts among the others, in declaration order: what a
+    /// pair of modes is named by in the statistics.
+    pub fn rank(self) -> u8 {
+        self as u8
+    }
+
     /// The capacity of the heap the mode runs over, or `None` for the
     /// interpreter, which has none.
     pub fn heap_words(self) -> Option<usize> {
@@ -207,6 +213,118 @@ pub struct Observed {
     /// tested a compiled frame's roots, rather than collecting and running
     /// compiled code at different moments. Never compared.
     pub collections_while_compiled: Option<u64>,
+    /// Instructions the encoded dispatch loop ran, for the lowered modes
+    /// ([`OwnedVm::instructions`]). Above nought on `vm`, which never enters
+    /// compiled code, it says the entry was accepted and its first instruction
+    /// ran; on a native mode it leaves out what compiled code ran. Never
+    /// compared.
+    pub instructions: Option<u64>,
+}
+
+/// How one run ended, in the kinds a full comparison is told apart by
+/// ([`Basis::Full`]).
+///
+/// **Success is [`RunOutcome::Success`] and nothing else**: the entry
+/// returned, and what it returned is not an `Err`. A `main` that returned
+/// `Err(..)` is [`End::Error`]; a guest trap is [`End::Trap`]; a run a limit
+/// the host set ended — the heap running out, the host-call or concurrency
+/// limit, the deadline, a call-depth limit — is [`End::Limit`]; anything else
+/// — a refused host call, cancellation, the debugger — is [`End::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum End {
+    /// [`RunOutcome::Success`].
+    Success,
+    /// [`RunOutcome::Error`]: the entry returned `Err`, which is a failure the
+    /// language expresses and not a stop.
+    Error,
+    /// [`RunOutcome::Invariant`] other than the heap running out: an overflow,
+    /// a division by zero, an out-of-range slice, a failed assertion.
+    Trap,
+    /// A limit the host set.
+    Limit,
+    /// Anything else.
+    Other,
+}
+
+impl End {
+    /// The kind's name, as the statistics key it.
+    pub fn name(self) -> &'static str {
+        match self {
+            End::Success => "success",
+            End::Error => "error",
+            End::Trap => "trap",
+            End::Limit => "limit",
+            End::Other => "other",
+        }
+    }
+
+    /// How `o` ended.
+    pub fn of(o: &Observed) -> End {
+        match o.stopped {
+            Some("cancelled") => return End::Other,
+            Some(_) => return End::Limit,
+            None => {}
+        }
+        match o.outcome {
+            RunOutcome::Success => End::Success,
+            RunOutcome::Error => End::Error,
+            RunOutcome::Invariant => End::Trap,
+            RunOutcome::HostCalls
+            | RunOutcome::Concurrency
+            | RunOutcome::Deadline
+            | RunOutcome::CallDepth => End::Limit,
+            RunOutcome::HostBoundary | RunOutcome::Cancelled | RunOutcome::Debugger => End::Other,
+        }
+    }
+}
+
+/// On what a pair of runs was compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Basis {
+    /// Neither run stopped in a way that belongs to its mode, so the outcome,
+    /// the answer and both streams were compared whole. `both` is the kind
+    /// both runs ended in, or `None` when they ended in different kinds —
+    /// which is always also a disagreement, since two kinds are two outcomes.
+    Full {
+        /// The kind both runs ended in, if it was one kind.
+        both: Option<End>,
+    },
+    /// One of them stopped in a way that belongs to its mode, so only the
+    /// prefix of each stream was compared. `common` is the bytes that
+    /// comparison could have found different — the shorter stdout and the
+    /// shorter stderr — and nought is an **empty** prefix comparison, one that
+    /// compared no output at all.
+    Prefix {
+        /// The bytes of output the comparison covered.
+        common: usize,
+    },
+}
+
+/// Two runs of one program compared: what [`disagreement`] decides, kept with
+/// what it was decided on, so that [`crate::stats`] counts the judgment the
+/// harness made and not a second one beside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pair {
+    /// The earlier run's mode, in the order the runs were made.
+    pub a: Mode,
+    /// The later run's.
+    pub b: Mode,
+    /// On what they were compared.
+    pub basis: Basis,
+    /// Whether either run entered compiled code.
+    pub native: bool,
+    /// How they disagreed, if they did.
+    pub disagreement: Option<String>,
+}
+
+impl Pair {
+    /// Compared in full, and both runs ended in [`End::Success`].
+    pub fn both_succeeded(&self) -> bool {
+        self.basis
+            == Basis::Full {
+                both: Some(End::Success),
+            }
+    }
 }
 
 impl Observed {
@@ -249,7 +367,12 @@ pub struct Report {
     pub observed: Vec<Observed>,
     /// Modes that did not run, and why.
     pub skipped: Vec<(Mode, String)>,
-    /// The first pair that disagreed, and how.
+    /// Every pair of [`Report::observed`], compared, in the order the
+    /// comparison visits them; the first that disagreed is
+    /// [`Report::mismatch`].
+    pub pairs: Vec<Pair>,
+    /// The first pair that disagreed, and how — or a finding that is no
+    /// pair's, such as an image that does not read back.
     pub mismatch: Option<String>,
     /// What the native tier compiled: how many of the reachable functions,
     /// and which of the program's own it refused and why. A generator whose
@@ -482,9 +605,11 @@ fn run_every_mode(lowered: Lowered) -> Report {
         Some(Err(why)) => {
             // `encode` and `decode` are each other's inverse over what this
             // build lowered, so failing either is a finding of its own.
+            let (pairs, _) = compare_all(&observed);
             return Report {
                 observed,
                 skipped,
+                pairs,
                 mismatch: Some(format!("the program's image does not read back: {why}")),
                 native: summary,
             };
@@ -508,10 +633,11 @@ fn run_every_mode(lowered: Lowered) -> Report {
         observed.insert(0, ast_run(&checked, &sources));
     }
 
-    let mismatch = first_mismatch(&observed);
+    let (pairs, mismatch) = compare_all(&observed);
     Report {
         observed,
         skipped,
+        pairs,
         mismatch,
         native: summary,
     }
@@ -519,23 +645,47 @@ fn run_every_mode(lowered: Lowered) -> Report {
 
 pub(crate) const OUT_OF_MEMORY: &str = "out of memory";
 
-/// The first pair of `observed` that disagrees, described.
-pub(crate) fn first_mismatch(observed: &[Observed]) -> Option<String> {
+/// Every pair of `observed` compared, and the first disagreement among them,
+/// described.
+pub(crate) fn compare_all(observed: &[Observed]) -> (Vec<Pair>, Option<String>) {
+    let mut pairs = Vec::new();
     for (i, a) in observed.iter().enumerate() {
         for b in &observed[i + 1..] {
-            if let Some(why) = disagreement(a, b) {
-                return Some(format!("{} and {}: {why}", a.mode.name(), b.mode.name()));
-            }
+            pairs.push(compare_pair(a, b));
         }
     }
-    None
+    let first = pairs.iter().find_map(|p| {
+        p.disagreement
+            .as_ref()
+            .map(|why| format!("{} and {}: {why}", p.a.name(), p.b.name()))
+    });
+    (pairs, first)
 }
 
-/// How `a` and `b` disagree, if they do, under the rules the module
-/// documentation states.
+/// How `a` and `b` disagree, if they do: [`compare_pair`]'s verdict.
 pub fn disagreement(a: &Observed, b: &Observed) -> Option<String> {
+    compare_pair(a, b).disagreement
+}
+
+/// Whether `a` and `b` are compared only by their prefixes, as
+/// [`compare_pair`] judges it.
+pub fn compared_by_prefix(a: &Observed, b: &Observed) -> bool {
+    matches!(compare_pair(a, b).basis, Basis::Prefix { .. })
+}
+
+/// `a` and `b` compared under the rules the module documentation states.
+///
+/// The one place the harness decides both *whether* two runs agree and *on
+/// what* they were compared. [`disagreement`] and [`compared_by_prefix`] are
+/// its two halves, a [`Report`] keeps every pair's, and the statistics read
+/// them from there, so a count cannot describe a different comparison from the
+/// one that was made.
+pub fn compare_pair(a: &Observed, b: &Observed) -> Pair {
+    let native = a.native_calls.unwrap_or(0) > 0 || b.native_calls.unwrap_or(0) > 0;
     let (a_stopped, b_stopped) = stops_between(a, b);
     if a_stopped.is_some() || b_stopped.is_some() {
+        let common = a.stdout.len().min(b.stdout.len()) + a.stderr.len().min(b.stderr.len());
+        let mut disagreement = None;
         for (stream, x, y) in [
             ("stdout", &a.stdout, &b.stdout),
             ("stderr", &a.stderr, &b.stderr),
@@ -549,35 +699,43 @@ pub fn disagreement(a: &Observed, b: &Observed) -> Option<String> {
             // stopped at is fine; one that printed something else, or that
             // finished having printed less, is not.
             if !long.starts_with(short) || (!short_stopped && short.len() != long.len()) {
-                return Some(format!("{stream} is not a prefix of the other's"));
+                disagreement = Some(format!("{stream} is not a prefix of the other's"));
+                break;
             }
         }
-        return None;
+        return Pair {
+            a: a.mode,
+            b: b.mode,
+            basis: Basis::Prefix { common },
+            native,
+            disagreement,
+        };
     }
-    if a.outcome != b.outcome {
-        return Some(format!(
+    let disagreement = if a.outcome != b.outcome {
+        Some(format!(
             "the run ended `{}` against `{}`",
             a.outcome.as_str(),
             b.outcome.as_str()
-        ));
+        ))
+    } else if a.answer != b.answer {
+        Some("the answers differ".to_string())
+    } else if a.stdout != b.stdout {
+        Some("stdout differs".to_string())
+    } else if a.stderr != b.stderr {
+        Some("stderr differs".to_string())
+    } else {
+        None
+    };
+    let (end_a, end_b) = (End::of(a), End::of(b));
+    Pair {
+        a: a.mode,
+        b: b.mode,
+        basis: Basis::Full {
+            both: (end_a == end_b).then_some(end_a),
+        },
+        native,
+        disagreement,
     }
-    if a.answer != b.answer {
-        return Some("the answers differ".to_string());
-    }
-    if a.stdout != b.stdout {
-        return Some("stdout differs".to_string());
-    }
-    if a.stderr != b.stderr {
-        return Some("stderr differs".to_string());
-    }
-    None
-}
-
-/// Whether `a` and `b` are compared only by their prefixes: whether either
-/// stopped in a way that belongs to its mode, as [`disagreement`] judges it.
-pub fn compared_by_prefix(a: &Observed, b: &Observed) -> bool {
-    let (a_stopped, b_stopped) = stops_between(a, b);
-    a_stopped.is_some() || b_stopped.is_some()
 }
 
 /// Each of `a` and `b`'s stop, if it is one that belongs to the mode *for this
@@ -623,11 +781,13 @@ fn lowered_run(
     let collections = vm.collections();
     let native_calls = vm.tiers().native();
     let under_compiled = vm.collections_while_compiled();
+    let instructions = vm.instructions();
     drop(vm);
     let mut observed = observe(mode, answer, &out, &err);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
     observed.collections_while_compiled = Some(under_compiled);
+    observed.instructions = Some(instructions);
     observed
 }
 
@@ -659,6 +819,7 @@ pub(crate) fn observe(
         collections: None,
         native_calls: None,
         collections_while_compiled: None,
+        instructions: None,
     }
 }
 
@@ -734,6 +895,7 @@ mod tests {
             collections: None,
             native_calls: None,
             collections_while_compiled: None,
+            instructions: None,
         }
     }
 

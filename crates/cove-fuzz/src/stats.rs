@@ -92,8 +92,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::differential::{compared_by_prefix, Mode, Report};
+use crate::differential::{Basis, End, Mode, Pair, Report};
 use crate::FrontStage;
+
+/// The targets whose input is a `cove_ir::Program` rather than a source.
+pub const IR_TARGETS: [&str; 3] = ["ir", "ir_mutate", "image"];
 
 /// What the statistics know of a lowered program before it runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -105,14 +108,78 @@ pub struct Front {
 }
 
 /// How far an input got.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reached {
     /// The bytes are not UTF-8, so not a source.
     NotUtf8,
     /// The front end refused it at this stage.
     Refused(FrontStage),
-    /// It lowered, and every mode ran.
+    /// An IR target's input did not read as a program: an image body
+    /// `cove_ir::serial::decode` refused.
+    Unreadable,
+    /// An IR target's program `cove_ir::verify` refused, with the rule. The
+    /// machine is asked to refuse it too (`ir`, `ir_mutate`) or not run at all
+    /// (`image`).
+    VerifyRefused(String),
+    /// It lowered (or, for an IR target, verified), and every mode ran.
     Ran,
+}
+
+/// How one pair of modes was compared, as the statistics count it: see the
+/// module documentation's `pairs` key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairKind {
+    /// Compared in full; the kind both runs ended in, or `None` for two kinds.
+    Full(Option<End>),
+    /// Compared by prefix; whether the common prefix was empty.
+    Prefix {
+        /// No byte of output was compared.
+        empty: bool,
+    },
+    /// Not compared: one of the two modes did not run, for this reason.
+    Skipped(String),
+    /// The program has no entry, which both modes refused alike.
+    NoEntry,
+}
+
+/// One pair of modes, classified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairClass {
+    /// `a|b`, the two modes' names in [`Mode`]'s order whichever ran first,
+    /// so that one pair is one key in every target.
+    pub key: String,
+    /// How it was compared.
+    pub kind: PairKind,
+    /// Either run entered compiled code.
+    pub native: bool,
+    /// The two disagreed.
+    pub mismatch: bool,
+}
+
+/// The key a pair of modes is counted under: their names in [`Mode`]'s order,
+/// joined by `|`.
+pub fn pair_key(a: Mode, b: Mode) -> String {
+    let (x, y) = if a.rank() <= b.rank() { (a, b) } else { (b, a) };
+    format!("{}|{}", x.name(), y.name())
+}
+
+impl PairClass {
+    fn of(pair: &Pair, has_entry: bool) -> PairClass {
+        let kind = if !has_entry {
+            PairKind::NoEntry
+        } else {
+            match pair.basis {
+                Basis::Full { both } => PairKind::Full(both),
+                Basis::Prefix { common } => PairKind::Prefix { empty: common == 0 },
+            }
+        };
+        PairClass {
+            key: pair_key(pair.a, pair.b),
+            kind,
+            native: pair.native,
+            mismatch: pair.disagreement.is_some(),
+        }
+    }
 }
 
 /// One mode's run, as the statistics count it.
@@ -122,6 +189,8 @@ pub struct ModeRun {
     pub mode: &'static str,
     /// How the run ended, by `RunOutcome` name.
     pub outcome: &'static str,
+    /// How the run ended, in [`End`]'s kinds.
+    pub end: End,
     /// The harness's reason, if the run stopped in a way that belongs to the
     /// mode.
     pub stopped: Option<&'static str>,
@@ -131,6 +200,13 @@ pub struct ModeRun {
     pub collected: bool,
     /// Collections made while a compiled frame was on the stack.
     pub collected_while_compiled: u64,
+    /// For a lowered mode, whether the encoded dispatch loop ran an
+    /// instruction: whether the entry was accepted and the run began. `None`
+    /// for the interpreter, which does not count.
+    pub started: Option<bool>,
+    /// Why a lowered run did not begin: its error's first line, numbers and
+    /// names left out, so that one refusal is one key.
+    pub not_started: Option<String>,
 }
 
 /// One input, classified. See the module documentation for what each part
@@ -147,6 +223,8 @@ pub struct Classification {
     pub runs: Vec<ModeRun>,
     /// Every mode that did not, and why.
     pub skipped: Vec<(&'static str, String)>,
+    /// Every pair of modes, ran or skipped, classified.
+    pub pairs: Vec<PairClass>,
     /// Pairs of modes compared in full.
     pub pairs_full: u64,
     /// Pairs of modes compared by prefix only.
@@ -170,6 +248,30 @@ impl Classification {
         Classification::stopped_at(target, Reached::Refused(stage), target == "differential")
     }
 
+    /// An IR target's input that does not read as a program.
+    pub fn unreadable(target: &'static str) -> Classification {
+        Classification::stopped_at(target, Reached::Unreadable, false)
+    }
+
+    /// An IR target's program `cove_ir::verify` refused for `why`; `runs` is
+    /// the one run that has to refuse it too, if one was made, and
+    /// `mismatch` whether it did not.
+    pub fn verify_refused(
+        target: &'static str,
+        why: &str,
+        report: Option<&Report>,
+        mismatch: bool,
+    ) -> Classification {
+        // A fault reads `<where>: <rule>`; the rule is the key, as
+        // `cove-fuzz ir-stats` keys it.
+        let rule = rule_of(why.split(": ").nth(1).unwrap_or(why));
+        let mut c = Classification::stopped_at(target, Reached::VerifyRefused(rule), mismatch);
+        if let Some(report) = report {
+            c.runs = report.observed.iter().map(mode_run).collect();
+        }
+        c
+    }
+
     fn stopped_at(target: &'static str, reached: Reached, mismatch: bool) -> Classification {
         Classification {
             target,
@@ -177,6 +279,7 @@ impl Classification {
             front: Front::default(),
             runs: Vec::new(),
             skipped: Vec::new(),
+            pairs: Vec::new(),
             pairs_full: 0,
             pairs_prefix: 0,
             pairs_empty_prefix: 0,
@@ -199,6 +302,12 @@ impl Classification {
         self.prefix() && self.pairs_empty_prefix == self.pairs_prefix
     }
 
+    /// Compared in full, and every run ended in [`End::Success`]: the one
+    /// kind of full comparison in which every mode ran the program to its end.
+    pub fn full_success(&self) -> bool {
+        self.full() && !self.runs.is_empty() && self.runs.iter().all(|r| r.end == End::Success)
+    }
+
     /// The `native` mode entered compiled code.
     pub fn native_ran(&self) -> bool {
         self.mode_did(Mode::Native, |r| r.entered_compiled_code)
@@ -209,44 +318,90 @@ impl Classification {
         self.runs.iter().any(|r| r.collected_while_compiled > 0)
     }
 
+    /// Whether the `vm` run began, if there was one: the entry was accepted
+    /// and its first instruction ran.
+    pub fn started(&self) -> Option<bool> {
+        self.runs
+            .iter()
+            .find(|r| r.mode == Mode::Vm.name())
+            .and_then(|r| r.started)
+    }
+
     fn mode_did(&self, mode: Mode, did: impl Fn(&ModeRun) -> bool) -> bool {
         self.runs.iter().any(|r| r.mode == mode.name() && did(r))
     }
 }
 
-/// `report`, the runs of a program that lowered, classified.
+/// One mode's observation, as the statistics count it.
+fn mode_run(o: &crate::differential::Observed) -> ModeRun {
+    let started = o.instructions.map(|n| n > 0);
+    ModeRun {
+        mode: o.mode.name(),
+        outcome: o.outcome.as_str(),
+        end: End::of(o),
+        stopped: o.stopped,
+        entered_compiled_code: o.native_calls.unwrap_or(0) > 0,
+        collected: o.collections.unwrap_or(0) > 0,
+        collected_while_compiled: o.collections_while_compiled.unwrap_or(0),
+        started,
+        not_started: (started == Some(false)).then(|| rule_of(&o.answer)),
+    }
+}
+
+/// A sentence as a key: its first line, up to the first backquote — where a
+/// name or a value would begin — with every digit written `#`.
+pub fn rule_of(why: &str) -> String {
+    let first = why.lines().next().unwrap_or("");
+    let first = first.split('`').next().unwrap_or(first);
+    first
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `report`, the runs of a program that lowered (or, for an IR target,
+/// verified), classified.
 pub fn classify(target: &'static str, report: &Report, front: Front) -> Classification {
     let mut classification = Classification::stopped_at(target, Reached::Ran, false);
     classification.front = front;
     classification.mismatch = report.mismatch.is_some();
-    classification.runs = report
-        .observed
-        .iter()
-        .map(|o| ModeRun {
-            mode: o.mode.name(),
-            outcome: o.outcome.as_str(),
-            stopped: o.stopped,
-            entered_compiled_code: o.native_calls.unwrap_or(0) > 0,
-            collected: o.collections.unwrap_or(0) > 0,
-            collected_while_compiled: o.collections_while_compiled.unwrap_or(0),
-        })
-        .collect();
+    classification.runs = report.observed.iter().map(mode_run).collect();
     classification.skipped = report
         .skipped
         .iter()
         .map(|(mode, why)| (mode.name(), why.clone()))
         .collect();
-    for (i, a) in report.observed.iter().enumerate() {
-        for b in &report.observed[i + 1..] {
-            if compared_by_prefix(a, b) {
+    // Every pair the harness compared, from the comparison it made.
+    for pair in &report.pairs {
+        match pair.basis {
+            Basis::Prefix { common } => {
                 classification.pairs_prefix += 1;
-                let common = |x: &[u8], y: &[u8]| x.len().min(y.len());
-                if common(&a.stdout, &b.stdout) == 0 && common(&a.stderr, &b.stderr) == 0 {
+                if common == 0 {
                     classification.pairs_empty_prefix += 1;
                 }
-            } else {
-                classification.pairs_full += 1;
             }
+            Basis::Full { .. } => classification.pairs_full += 1,
+        }
+        classification
+            .pairs
+            .push(PairClass::of(pair, front.has_entry));
+    }
+    // And every pair one of whose modes did not run, with that mode's reason.
+    let ran: Vec<Mode> = report.observed.iter().map(|o| o.mode).collect();
+    for (i, (mode, why)) in report.skipped.iter().enumerate() {
+        let others = ran
+            .iter()
+            .copied()
+            .chain(report.skipped[i + 1..].iter().map(|(m, _)| *m));
+        for other in others {
+            classification.pairs.push(PairClass {
+                key: pair_key(*mode, other),
+                kind: PairKind::Skipped(why.clone()),
+                native: false,
+                mismatch: false,
+            });
         }
     }
     classification
@@ -303,7 +458,7 @@ impl Stats {
     }
 
     /// The keys of the groups under `path`.
-    fn groups(&self, path: &[&str]) -> Vec<String> {
+    pub fn groups(&self, path: &[&str]) -> Vec<String> {
         let mut group = &self.root;
         for key in path {
             match group.get(*key) {
@@ -349,9 +504,106 @@ impl Stats {
         if c.mismatch {
             self.add(&["mismatches"], 1);
         }
-        // Each stage counts the inputs that passed it.
+        if IR_TARGETS.contains(&c.target) {
+            self.record_ir_stages(c);
+        } else {
+            self.record_source_stages(c);
+        }
+        if c.reached != Reached::Ran {
+            for run in &c.runs {
+                self.record_run(run);
+            }
+            return;
+        }
+        if c.started() == Some(true) {
+            self.add(&["stages", "started"], 1);
+        }
+        // Why the program did not begin, once a program: on `vm`, which
+        // never enters compiled code.
+        for run in c.runs.iter().filter(|r| r.mode == Mode::Vm.name()) {
+            if let Some(why) = &run.not_started {
+                self.add(&["not_started", why], 1);
+            }
+        }
+
+        let (native, under) = (c.native_ran(), c.gc_while_compiled());
+        if c.front.has_entry {
+            let kind = if c.full() { "full" } else { "prefix" };
+            self.add(&["comparisons", kind], 1);
+            if native {
+                self.add(&["comparisons", &format!("{kind}_with_native")], 1);
+            }
+            if under {
+                self.add(
+                    &["comparisons", &format!("{kind}_with_gc_while_compiled")],
+                    1,
+                );
+            }
+            if c.full_success() {
+                self.add(&["comparisons", "full_success"], 1);
+                if native {
+                    self.add(&["comparisons", "full_success_with_native"], 1);
+                }
+            }
+            if c.empty_prefix() {
+                self.add(&["comparisons", "empty_prefix"], 1);
+            }
+            self.add(&["comparisons", "pairs_full"], c.pairs_full);
+            self.add(&["comparisons", "pairs_prefix"], c.pairs_prefix);
+            self.add(&["comparisons", "pairs_empty_prefix"], c.pairs_empty_prefix);
+        } else {
+            // Every mode refuses a program with no `main` alike, before its
+            // first instruction: the agreement compares a refusal, not a run.
+            self.add(&["comparisons", "no_entry"], 1);
+        }
+
+        for pair in &c.pairs {
+            let key = pair.key.as_str();
+            match &pair.kind {
+                PairKind::Full(both) => {
+                    let kind = both.map_or("mixed", End::name);
+                    self.add(&["pairs", key, "full", kind], 1);
+                    if *both == Some(End::Success) && pair.native {
+                        self.add(&["pairs", key, "full_success_with_native"], 1);
+                    }
+                }
+                PairKind::Prefix { empty } => {
+                    let kind = if *empty { "empty" } else { "nonempty" };
+                    self.add(&["pairs", key, "prefix", kind], 1);
+                }
+                PairKind::Skipped(why) => self.add(&["pairs", key, "skipped", why], 1),
+                PairKind::NoEntry => self.add(&["pairs", key, "no_entry"], 1),
+            }
+            if pair.mismatch {
+                self.add(&["pairs", key, "mismatch"], 1);
+            }
+        }
+
+        if native {
+            self.add(&["programs", "native_ran"], 1);
+        }
+        if c.mode_did(Mode::VmGc, |r| r.collected) {
+            self.add(&["programs", "vm_gc_collected"], 1);
+        }
+        if c.mode_did(Mode::NativeGc, |r| r.collected) {
+            self.add(&["programs", "native_gc_collected"], 1);
+        }
+        if under {
+            self.add(&["programs", "gc_while_compiled"], 1);
+        }
+
+        for run in &c.runs {
+            self.record_run(run);
+        }
+        for (mode, why) in &c.skipped {
+            self.add(&["modes", mode, "skipped", why], 1);
+        }
+    }
+
+    /// The source targets' stages: each counts the inputs that passed it.
+    fn record_source_stages(&mut self, c: &Classification) {
         let passed = match c.reached {
-            Reached::NotUtf8 => 0,
+            Reached::NotUtf8 | Reached::Unreadable | Reached::VerifyRefused(_) => 0,
             Reached::Refused(FrontStage::Parse) => 1,
             Reached::Refused(FrontStage::Check) => 2,
             Reached::Refused(FrontStage::Lower) => 3,
@@ -370,68 +622,54 @@ impl Stats {
             self.add(&["stages", "entry"], 1);
         }
         self.add(&["stages", "ran"], 1);
+    }
 
-        let (native, under) = (c.native_ran(), c.gc_while_compiled());
-        if c.front.has_entry {
-            let kind = if c.full() { "full" } else { "prefix" };
-            self.add(&["comparisons", kind], 1);
-            if native {
-                self.add(&["comparisons", &format!("{kind}_with_native")], 1);
+    /// The IR targets' stages: `built` (generated, or decoded), `verified`,
+    /// `entry` (the program has the function it is entered by), `ran` (every
+    /// mode was run and compared); and `refusals.<rule>` for what `verify`
+    /// refused.
+    fn record_ir_stages(&mut self, c: &Classification) {
+        match &c.reached {
+            Reached::Unreadable | Reached::NotUtf8 | Reached::Refused(_) => {}
+            Reached::VerifyRefused(rule) => {
+                self.add(&["stages", "built"], 1);
+                self.add(&["refusals", rule], 1);
             }
-            if under {
-                self.add(
-                    &["comparisons", &format!("{kind}_with_gc_while_compiled")],
-                    1,
-                );
+            Reached::Ran => {
+                self.add(&["stages", "built"], 1);
+                self.add(&["stages", "verified"], 1);
+                if c.front.has_entry {
+                    self.add(&["stages", "entry"], 1);
+                }
+                self.add(&["stages", "ran"], 1);
             }
-            if c.empty_prefix() {
-                self.add(&["comparisons", "empty_prefix"], 1);
-            }
-            self.add(&["comparisons", "pairs_full"], c.pairs_full);
-            self.add(&["comparisons", "pairs_prefix"], c.pairs_prefix);
-            self.add(&["comparisons", "pairs_empty_prefix"], c.pairs_empty_prefix);
-        } else {
-            // Every mode refuses a program with no `main` alike, before its
-            // first instruction: the agreement compares a refusal, not a run.
-            self.add(&["comparisons", "no_entry"], 1);
         }
+    }
 
-        if native {
-            self.add(&["programs", "native_ran"], 1);
+    /// One mode's run.
+    fn record_run(&mut self, run: &ModeRun) {
+        let mode = run.mode;
+        self.add(&["modes", mode, "ran"], 1);
+        match run.stopped {
+            Some(why) => self.add(&["modes", mode, "stopped", why], 1),
+            None => self.add(&["modes", mode, "ended", run.outcome], 1),
         }
-        if c.mode_did(Mode::VmGc, |r| r.collected) {
-            self.add(&["programs", "vm_gc_collected"], 1);
+        self.add(&["modes", mode, "end", run.end.name()], 1);
+        if run.started == Some(true) {
+            self.add(&["modes", mode, "started"], 1);
         }
-        if c.mode_did(Mode::NativeGc, |r| r.collected) {
-            self.add(&["programs", "native_gc_collected"], 1);
+        if run.entered_compiled_code {
+            self.add(&["modes", mode, "entered_compiled_code"], 1);
         }
-        if under {
-            self.add(&["programs", "gc_while_compiled"], 1);
+        if run.collected {
+            self.add(&["modes", mode, "collected"], 1);
         }
-
-        for run in &c.runs {
-            let mode = ["modes", run.mode];
-            self.add(&[mode[0], mode[1], "ran"], 1);
-            match run.stopped {
-                Some(why) => self.add(&[mode[0], mode[1], "stopped", why], 1),
-                None => self.add(&[mode[0], mode[1], "ended", run.outcome], 1),
-            }
-            if run.entered_compiled_code {
-                self.add(&[mode[0], mode[1], "entered_compiled_code"], 1);
-            }
-            if run.collected {
-                self.add(&[mode[0], mode[1], "collected"], 1);
-            }
-            if run.collected_while_compiled > 0 {
-                self.add(&[mode[0], mode[1], "collected_while_compiled"], 1);
-                self.add(
-                    &["collections_while_compiled"],
-                    run.collected_while_compiled,
-                );
-            }
-        }
-        for (mode, why) in &c.skipped {
-            self.add(&["modes", mode, "skipped", why], 1);
+        if run.collected_while_compiled > 0 {
+            self.add(&["modes", mode, "collected_while_compiled"], 1);
+            self.add(
+                &["collections_while_compiled"],
+                run.collected_while_compiled,
+            );
         }
     }
 
@@ -498,21 +736,56 @@ impl Stats {
             g(&["crashes"]),
             g(&["inputs"]),
         );
-        let s = |key: &str| self.get(&["stages", key]);
         let _ = writeln!(
             out,
-            "front end: {} inputs, {} UTF-8, {} parsed, {} checked, {} lowered, {} verified, \
-             {} with an entry, {} ran ({} with no entry, compared as a refusal)",
-            g(&["inputs"]),
-            s("utf8"),
-            s("parsed"),
-            s("checked"),
-            s("lowered"),
-            s("verified"),
-            s("entry"),
-            s("ran"),
-            c("no_entry"),
+            "of the {} compared in full, {} ran to success in every mode, {} of those with native \
+             execution (a full comparison also counts runs that ended alike in an error, a trap \
+             or a limit: see `pairs`)",
+            c("full"),
+            c("full_success"),
+            c("full_success_with_native"),
         );
+        let s = |key: &str| self.get(&["stages", key]);
+        let ir = IR_TARGETS.iter().any(|t| g(&["targets", t]) > 0);
+        let source = g(&["inputs"]) > IR_TARGETS.iter().map(|t| g(&["targets", t])).sum::<u64>();
+        if source {
+            let _ = writeln!(
+                out,
+                "front end: {} inputs, {} UTF-8, {} parsed, {} checked, {} lowered, {} verified, \
+                 {} with an entry, {} ran ({} with no entry, compared as a refusal), {} started on \
+                 `vm`",
+                g(&["inputs"]),
+                s("utf8"),
+                s("parsed"),
+                s("checked"),
+                s("lowered"),
+                s("verified"),
+                s("entry"),
+                s("ran"),
+                c("no_entry"),
+                s("started"),
+            );
+        }
+        if ir {
+            let _ = writeln!(
+                out,
+                "IR: {} built (generated or decoded), {} verified, {} with their entry, {} ran, {} \
+                 started on `vm` (the entry and its arguments accepted, a first instruction run)",
+                s("built"),
+                s("verified"),
+                s("entry"),
+                s("ran"),
+                s("started"),
+            );
+            let mut refusals: Vec<_> = self.group(&["refusals"]).into_iter().collect();
+            refusals.sort_by_key(|row| std::cmp::Reverse(row.1));
+            for (rule, n) in refusals.iter().take(8) {
+                let _ = writeln!(out, "  refused by verify: {n:6} {rule}");
+            }
+        }
+        for (why, n) in self.group(&["not_started"]) {
+            let _ = writeln!(out, "  did not start: {n:6} {why}");
+        }
         let _ = writeln!(
             out,
             "pairs of modes: {} compared in full, {} by prefix only, {} of those with an empty \
@@ -522,6 +795,51 @@ impl Stats {
             c("pairs_empty_prefix"),
             share(c("pairs_empty_prefix"), c("pairs_prefix")),
         );
+        let pairs = self.groups(&["pairs"]);
+        if !pairs.is_empty() {
+            let _ = writeln!(
+                out,
+                "  {:<22} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>7} {:>7} {:>7} {:>5}",
+                "pair",
+                "full",
+                "success",
+                "error",
+                "trap",
+                "limit",
+                "other",
+                "mixed",
+                "succ+nat",
+                "prefix",
+                "empty",
+                "skipped",
+                "no-main",
+                "diff"
+            );
+        }
+        for pair in pairs {
+            let f = |kind: &str| self.get(&["pairs", &pair, "full", kind]);
+            let full: u64 = self.group(&["pairs", &pair, "full"]).values().sum();
+            let prefix: u64 = self.group(&["pairs", &pair, "prefix"]).values().sum();
+            let skipped: u64 = self.group(&["pairs", &pair, "skipped"]).values().sum();
+            let _ = writeln!(
+                out,
+                "  {:<22} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>7} {:>7} {:>7} {:>5}",
+                pair,
+                full,
+                f("success"),
+                f("error"),
+                f("trap"),
+                f("limit"),
+                f("other"),
+                f("mixed"),
+                self.get(&["pairs", &pair, "full_success_with_native"]),
+                prefix,
+                self.get(&["pairs", &pair, "prefix", "empty"]),
+                skipped,
+                self.get(&["pairs", &pair, "no_entry"]),
+                self.get(&["pairs", &pair, "mismatch"]),
+            );
+        }
         let p = |key: &str| self.get(&["programs", key]);
         let _ = writeln!(
             out,
@@ -547,6 +865,7 @@ impl Stats {
             };
             let _ = write!(out, "  {mode}: ran {}", m("ran"));
             for (key, label) in [
+                ("end", "end"),
                 ("ended", "ended"),
                 ("stopped", "stopped"),
                 ("skipped", "skipped"),
@@ -557,6 +876,7 @@ impl Stats {
                 }
             }
             for (key, label) in [
+                ("started", "started"),
                 ("entered_compiled_code", "entered compiled code"),
                 ("collected", "collected"),
                 (
@@ -885,7 +1205,13 @@ fn write_session(dir: &Path, target: &str, stats: &Stats) {
 }
 
 /// The targets [`replay`] can count.
-pub const TARGETS: [&str; 2] = ["differential", "differential_source"];
+pub const TARGETS: [&str; 5] = [
+    "differential",
+    "differential_source",
+    "ir",
+    "ir_mutate",
+    "image",
+];
 
 /// What [`replay`] found: the counts, and every input that was a finding.
 #[derive(Debug, Default)]
@@ -908,6 +1234,9 @@ pub fn replay(target: &str, paths: &[PathBuf]) -> Result<Replay, String> {
     let classify: fn(&[u8]) -> (Classification, Option<String>) = match target {
         "differential" => crate::differential::differential_classified,
         "differential_source" => crate::differential::differential_source_classified,
+        "ir" => crate::ir::ir_classified,
+        "ir_mutate" => crate::ir::ir_mutate_classified,
+        "image" => crate::image_classified,
         _ => {
             return Err(format!(
                 "no statistics for `{target}`: {}",
@@ -972,6 +1301,21 @@ pub fn replay(target: &str, paths: &[PathBuf]) -> Result<Replay, String> {
     }
     std::panic::set_hook(hook);
     Ok(replay)
+}
+
+/// Every file under `paths` — files, and the files of directories,
+/// recursively — in a stable order, leaving out `*.md` and dot-files.
+///
+/// # Errors
+///
+/// If a path cannot be read.
+pub fn files_under(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for path in paths {
+        collect_files(path, &mut files)?;
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn collect_files(path: &Path, into: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -1046,14 +1390,17 @@ mod tests {
             collections: mode.heap_words().map(|_| 0),
             native_calls: mode.heap_words().map(|_| 0),
             collections_while_compiled: mode.heap_words().map(|_| 0),
+            instructions: mode.heap_words().map(|_| 1),
         }
     }
 
     fn report(observed: Vec<Observed>) -> Report {
+        let (pairs, mismatch) = crate::differential::compare_all(&observed);
         Report {
             observed,
             skipped: Vec::new(),
-            mismatch: None,
+            pairs,
+            mismatch,
             native: None,
         }
     }
@@ -1218,6 +1565,135 @@ mod tests {
         apart.collections_while_compiled = Some(0);
         let c = classify("differential", &report(vec![apart]), FRONT);
         assert!(!c.gc_while_compiled());
+    }
+
+    /// Every pair is counted under one key whichever mode ran first, by how
+    /// it was compared and how its two runs ended — and the count is the
+    /// comparison the harness made, read from the report.
+    #[test]
+    fn pairs_are_counted_by_how_they_were_compared() {
+        let trap = |mode| {
+            let mut o = ran(mode, "1\n", None);
+            o.outcome = RunOutcome::Invariant;
+            o
+        };
+        let mut native = ran(Mode::Native, "1\n", None);
+        native.native_calls = Some(2);
+        let silent_oom = {
+            let mut o = ran(Mode::VmGc, "", Some(crate::differential::OUT_OF_MEMORY));
+            o.outcome = RunOutcome::Invariant;
+            o
+        };
+        let mut r = report(vec![
+            ran(Mode::Ast, "1\n", None),
+            ran(Mode::Vm, "1\n", None),
+            native,
+            silent_oom,
+        ]);
+        r.skipped.push((Mode::NativeGc, "no tier".to_string()));
+        let c = classify("differential", &r, FRONT);
+        let kind = |key: &str| {
+            c.pairs
+                .iter()
+                .find(|p| p.key == key)
+                .map(|p| p.kind.clone())
+                .unwrap_or_else(|| panic!("no pair {key}: {:?}", c.pairs))
+        };
+        assert_eq!(kind("ast|vm"), PairKind::Full(Some(End::Success)));
+        assert_eq!(kind("vm|native"), PairKind::Full(Some(End::Success)));
+        assert_eq!(kind("vm|vm-gc"), PairKind::Prefix { empty: true });
+        assert_eq!(
+            kind("native|native-gc"),
+            PairKind::Skipped("no tier".to_string()),
+            "a pair is keyed in `Mode`'s order, whichever ran first"
+        );
+        assert_eq!(c.pairs.len(), 6 + 4, "four ran, one skipped");
+
+        let mut stats = Stats::new();
+        stats.record(&c);
+        assert_eq!(stats.get(&["pairs", "ast|vm", "full", "success"]), 1);
+        assert_eq!(
+            stats.get(&["pairs", "vm|native", "full_success_with_native"]),
+            1
+        );
+        assert_eq!(
+            stats.get(&["pairs", "ast|vm", "full_success_with_native"]),
+            0
+        );
+        assert_eq!(stats.get(&["pairs", "vm|vm-gc", "prefix", "empty"]), 1);
+        assert_eq!(
+            stats.get(&["pairs", "native|native-gc", "skipped", "no tier"]),
+            1
+        );
+        assert_eq!(stats.get(&["comparisons", "prefix"]), 1);
+        assert_eq!(stats.get(&["comparisons", "full_success"]), 0);
+
+        // Two runs that trapped alike are a full comparison, and not a
+        // success.
+        let c = classify(
+            "differential",
+            &report(vec![trap(Mode::Vm), trap(Mode::Native)]),
+            FRONT,
+        );
+        assert!(c.full() && !c.full_success());
+        let mut stats = Stats::new();
+        stats.record(&c);
+        assert_eq!(stats.get(&["pairs", "vm|native", "full", "trap"]), 1);
+        assert_eq!(stats.get(&["comparisons", "full_success"]), 0);
+
+        // Two that ended differently are `mixed`, and a mismatch.
+        let c = classify(
+            "differential",
+            &report(vec![ran(Mode::Vm, "1\n", None), trap(Mode::Native)]),
+            FRONT,
+        );
+        let mut stats = Stats::new();
+        stats.record(&c);
+        assert_eq!(stats.get(&["pairs", "vm|native", "full", "mixed"]), 1);
+        assert_eq!(stats.get(&["pairs", "vm|native", "mismatch"]), 1);
+        assert_eq!(stats.get(&["mismatches"]), 1);
+
+        // And the ones that finished alike everywhere are full successes.
+        let c = classify(
+            "differential",
+            &report(vec![
+                ran(Mode::Vm, "1\n", None),
+                ran(Mode::Image, "1\n", None),
+            ]),
+            FRONT,
+        );
+        assert!(c.full_success());
+    }
+
+    /// The IR targets count their own stages: built, verified, refused with a
+    /// rule, entry, started.
+    #[test]
+    fn the_ir_stages_are_their_own() {
+        let mut stats = Stats::new();
+        stats.record(&Classification::unreadable("image"));
+        stats.record(&Classification::verify_refused(
+            "ir",
+            "in `f` at pc 3: slot 7 is out of range",
+            None,
+            false,
+        ));
+        let mut ok = ran(Mode::Vm, "", None);
+        ok.instructions = Some(5);
+        let mut refused = ran(Mode::Image, "", None);
+        refused.instructions = Some(0);
+        refused.outcome = RunOutcome::Invariant;
+        refused.answer = "`m.f` takes 1 argument(s), and was given 0".to_string();
+        let c = classify("ir", &report(vec![ok, refused]), FRONT);
+        assert_eq!(c.started(), Some(true));
+        stats.record(&c);
+        assert_eq!(stats.get(&["inputs"]), 3);
+        assert_eq!(stats.get(&["stages", "built"]), 2);
+        assert_eq!(stats.get(&["stages", "verified"]), 1);
+        assert_eq!(stats.get(&["stages", "ran"]), 1);
+        assert_eq!(stats.get(&["stages", "started"]), 1);
+        assert_eq!(stats.get(&["stages", "utf8"]), 0, "no source stage");
+        assert_eq!(stats.get(&["refusals", "slot # is out of range"]), 1);
+        assert_eq!(stats.get(&["modes", "image", "end", "trap"]), 1);
     }
 
     #[test]
