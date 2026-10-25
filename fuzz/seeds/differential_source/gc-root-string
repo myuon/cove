@@ -1,0 +1,21 @@
+use console.println
+
+// A string the program built, held in a compiled frame while the same frame
+// allocates enough to collect, and read after.
+fn holdString(seed: Int) -> String {
+  let held = "held:{seed}:{seed * 31}:{seed * 977}:tail"
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{held} {held.byteLength()} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdString(7))?
+  println(holdString(11))?
+  Ok(())
+}
