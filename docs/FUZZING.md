@@ -514,7 +514,10 @@ outermost frame always runs encoded). For the instructions whose answer a
 plausible wrong implementation would get wrong only in one state, it also reads
 the operands (up to 256 times a site) and counts `<key>:<state>` as
 `triggered` and `triggered_compiled`: `Cmp.Int.<op>:equal`, two equal
-operands, where `<` and `<=` differ; `Arith.Int.<op>:overflow` and
+operands, where `<` and `<=` differ — and the same for the forms the code
+generator emits through the same template, `CmpImm.<op>`,
+`CmpBranch.Int.<op>` and `CmpImmBranch.<op>`, which a counted loop's test
+usually is; `Arith.Int.<op>:overflow` and
 `ArithImm.<op>:overflow`, an addition, subtraction or multiplication whose
 exact answer is not an `Int`, where checking and wrapping differ. The counts
 are of programs. What it
