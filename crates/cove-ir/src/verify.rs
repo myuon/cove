@@ -36,6 +36,8 @@
 //! at collection time.
 
 mod indices;
+mod layouts;
+pub mod places;
 
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
 use crate::layout::{LayoutId, Shape};
@@ -75,6 +77,12 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
     if !faults.is_empty() {
         return Err(faults);
     }
+    // Then that every layout means what its words say, before any check reads
+    // a layout's words as the truth about its shape.
+    faults = layouts::check(program);
+    if !faults.is_empty() {
+        return Err(faults);
+    }
     for (index, function) in program.functions.iter().enumerate() {
         Check {
             program,
@@ -85,6 +93,12 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
             faults: &mut faults,
         }
         .run();
+    }
+    // And last, across functions, where every address goes and what it is
+    // used as: a question about the whole call graph, asked of a program
+    // whose every instruction is already known to be well formed.
+    if faults.is_empty() {
+        faults = places::check(program);
     }
     if faults.is_empty() {
         Ok(())

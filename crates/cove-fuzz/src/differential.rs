@@ -146,6 +146,10 @@ pub enum Mode {
     NativeGc,
     /// The encoded VM over the program read back from its serialised image.
     Image,
+    /// The encoded VM again, over the same heap as [`Mode::Vm`], in a machine
+    /// of its own: a run that answers differently the second time depends on
+    /// something that is not the program. Only the IR harnesses run it.
+    Again,
 }
 
 impl Mode {
@@ -158,6 +162,7 @@ impl Mode {
             Mode::VmGc => "vm-gc",
             Mode::NativeGc => "native-gc",
             Mode::Image => "image",
+            Mode::Again => "vm-again",
         }
     }
 
@@ -166,7 +171,7 @@ impl Mode {
     pub fn heap_words(self) -> Option<usize> {
         match self {
             Mode::Ast => None,
-            Mode::Vm | Mode::Native | Mode::Image => Some(HEAP_WORDS),
+            Mode::Vm | Mode::Native | Mode::Image | Mode::Again => Some(HEAP_WORDS),
             Mode::VmGc | Mode::NativeGc => Some(GC_HEAP_WORDS),
         }
     }
@@ -454,10 +459,10 @@ fn run_every_mode(lowered: Lowered) -> Report {
     }
 }
 
-const OUT_OF_MEMORY: &str = "out of memory";
+pub(crate) const OUT_OF_MEMORY: &str = "out of memory";
 
 /// The first pair of `observed` that disagrees, described.
-fn first_mismatch(observed: &[Observed]) -> Option<String> {
+pub(crate) fn first_mismatch(observed: &[Observed]) -> Option<String> {
     for (i, a) in observed.iter().enumerate() {
         for b in &observed[i + 1..] {
             if let Some(why) = disagreement(a, b) {
@@ -517,13 +522,13 @@ pub fn disagreement(a: &Observed, b: &Observed) -> Option<String> {
 }
 
 /// The hosts one run gets, and the buffers its console writes into.
-fn hosts() -> (HostRegistry, Buffer, Buffer) {
+pub(crate) fn hosts(limits: cove_runtime::Limits) -> (HostRegistry, Buffer, Buffer) {
     let (out, err) = (Buffer::default(), Buffer::default());
     let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
     hosts.register(Box::new(Console::new(out.clone(), err.clone())));
     hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
     hosts.set_grant_source(GrantSource::Sealed);
-    hosts.set_budget(Budget::with_cancellation(limits(), Cancellation::new()));
+    hosts.set_budget(Budget::with_cancellation(limits, Cancellation::new()));
     (hosts, out, err)
 }
 
@@ -534,7 +539,7 @@ fn lowered_run(
     prepared: PreparedProgram,
     heap_words: usize,
 ) -> Observed {
-    let (hosts, out, err) = hosts();
+    let (hosts, out, err) = hosts(limits());
     let hosts = Arc::new(hosts);
     let runtime = Arc::new(Runtime::new(
         Arc::clone(checked),
@@ -553,13 +558,13 @@ fn lowered_run(
 }
 
 fn ast_run(checked: &Arc<cove_sema::resolve::Program>, sources: &Arc<SourceMap>) -> Observed {
-    let (hosts, out, err) = hosts();
+    let (hosts, out, err) = hosts(limits());
     let runtime = Runtime::new(Arc::clone(checked), Arc::clone(sources), Arc::new(hosts));
     let answer = Interpreter::new(&runtime).run_entry(MODULE, ENTRY, Vec::<Rc<str>>::new());
     observe(Mode::Ast, answer, &out, &err)
 }
 
-fn observe(
+pub(crate) fn observe(
     mode: Mode,
     answer: Result<Value, RuntimeError>,
     out: &Buffer,
@@ -613,7 +618,7 @@ fn described(error: &RuntimeError) -> String {
 
 /// A console stream, kept where the harness can read it back.
 #[derive(Clone, Default)]
-struct Buffer(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Buffer(Arc<Mutex<Vec<u8>>>);
 
 impl Buffer {
     fn bytes(&self) -> Vec<u8> {

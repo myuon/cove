@@ -989,7 +989,16 @@ pub(crate) fn on_path(machine: &Machine, view: View, entry: u64, depth: i64) -> 
         return false;
     };
     let mut entry = entry;
+    // A path's entry and depth are words a program's frame holds, so a walk
+    // stops at the first entry that is not three words of this task's stack
+    // in use (ADR 0120): what is read there is compared, never followed out
+    // of the stack, and an entry that names nothing is not on the path.
+    let origin = machine.mem.stack_origin();
+    let top = origin.saturating_add(machine.mem.stack_words());
     for _ in 0..depth.max(0) {
+        if entry < origin || entry.saturating_add(3) > top {
+            return false;
+        }
         let at = machine.mem.stack_index(entry);
         if machine.mem.word_at(at) == vector {
             return true;

@@ -66,6 +66,47 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        // The VM-level targets (ADR 0120): the program an input makes, as a
+        // listing, and every mode's run of it. Non-zero on a finding.
+        "ir-show" | "ir-mutate-show" | "image-show" => {
+            let mut found = false;
+            for path in rest {
+                let bytes = read(path);
+                let subject = match command.as_str() {
+                    "ir-show" => Some(cove_fuzz::irgen::from_bytes(&bytes)),
+                    "ir-mutate-show" => cove_fuzz::mutate::from_bytes(&bytes),
+                    _ => cove_fuzz::ir::image_input(&bytes),
+                };
+                println!("=== {path}");
+                let Some(subject) = subject else {
+                    println!("no program: the input does not read");
+                    continue;
+                };
+                println!("--- program ---\n{}", cove_fuzz::ir::listing(&subject.program));
+                println!("--- entry ---\n{}.{}{:?}", subject.module, subject.name, subject.args);
+                let report = cove_fuzz::ir::run(subject);
+                println!("--- runs ---\n{}", report.describe());
+                found |= report.is_finding();
+            }
+            if found {
+                return ExitCode::FAILURE;
+            }
+        }
+        // How the `ir` generator does over COUNT fixed inputs: the share that
+        // verifies, the kinds it reached, and how the runs ended.
+        "ir-stats" => {
+            let count: u64 = rest.first().and_then(|n| n.parse().ok()).unwrap_or(200);
+            print!("{}", cove_fuzz::ir::stats(count));
+        }
+        // The input `ir-stats` made for SEED, written to OUT, to replay.
+        "ir-seed" => {
+            let (Some(seed), Some(out)) = (rest.first().and_then(|n| n.parse().ok()), rest.get(1))
+            else {
+                eprintln!("usage: cove-fuzz ir-seed SEED OUT");
+                return ExitCode::from(2);
+            };
+            std::fs::write(out, cove_fuzz::ir::stats_input(seed)).expect("write the input");
+        }
         "explain" => {
             for path in rest {
                 let text = String::from_utf8_lossy(&read(path)).into_owned();
@@ -113,6 +154,32 @@ fn main() -> ExitCode {
                 }
             }
             eprintln!("wrote {written} image bodies to {out}");
+        }
+        // `ir_mutate` inputs: the image body of each source, behind its
+        // length, with `CHOICES` bytes of edits after it.
+        "ir-mutate-seed" => {
+            let Some((out, sources)) = rest.split_first() else {
+                eprintln!("usage: cove-fuzz ir-mutate-seed OUT_DIR FILE...");
+                return ExitCode::from(2);
+            };
+            std::fs::create_dir_all(out).expect("create the output directory");
+            let mut written = 0;
+            for (n, path) in sources.iter().enumerate() {
+                let Ok(text) = String::from_utf8(read(path)) else {
+                    continue;
+                };
+                if let Some(body) = cove_fuzz::image_body(&text) {
+                    let choices = cove_fuzz::ir::choices(n as u64, 16);
+                    let name = path.replace(['/', '.'], "_");
+                    std::fs::write(
+                        Path::new(out).join(name),
+                        cove_fuzz::mutate::input(&body, &choices),
+                    )
+                    .expect("write a seed");
+                    written += 1;
+                }
+            }
+            eprintln!("wrote {written} ir_mutate inputs to {out}");
         }
         target => {
             let Some(harness) = cove_fuzz::harness(target) else {

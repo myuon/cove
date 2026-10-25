@@ -233,6 +233,13 @@ const _: () = assert!(
     "a heap chunk is the size `cove_native` says it is"
 );
 
+/// The bit a root carries when it is the address of a word *inside* an object
+/// rather than of its header: what [`Roots::each_root`] hands over for a frame's
+/// `Repr::Addr` slot that names a field (ADR 0120). The collection marks the
+/// object the address is inside. No linear address reaches the bit: the two
+/// regions together are far short of 2^63 words.
+pub(crate) const INTERIOR: u64 = 1 << 63;
+
 /// Whether a linear address names a word of the stack region.
 ///
 /// This one comparison is the entire region decoder, and the entire knowledge
@@ -1546,9 +1553,19 @@ impl Space {
         // reclaiming memory because there is none left.
         let mut work: Vec<u64> = Vec::new();
         let bump = STACK_WORDS + alloc.bump;
+        let mut interior = Vec::new();
         for &addr in roots {
-            if reachable(addr, bump) && set_mark(&mut alloc.marks, addr) {
+            if addr & INTERIOR != 0 {
+                interior.push(addr & !INTERIOR);
+            } else if reachable(addr, bump) && set_mark(&mut alloc.marks, addr) {
                 work.push(addr);
+            }
+        }
+        if !interior.is_empty() {
+            for addr in self.containers(alloc, layouts, interior) {
+                if set_mark(&mut alloc.marks, addr) {
+                    work.push(addr);
+                }
             }
         }
 
@@ -1565,6 +1582,48 @@ impl Space {
             live_words,
             collections: alloc.collections,
         }
+    }
+
+    /// The objects `interior` addresses point into: one walk of the heap's
+    /// blocks, the sweep's own, over the addresses in order.
+    ///
+    /// What a frame's `Repr::Addr` slot holds when it names a field of an
+    /// object (ADR 0120): the address of a payload word, not of a header, so
+    /// it cannot be marked as it is. The lowering keeps every such object in a
+    /// `Ref` slot for as long as the address lives, and so a collection never
+    /// needed this; a program that clears that slot first and goes on using
+    /// the address would be writing into a block the sweep handed to the next
+    /// allocation. So an address into the heap is a root too, of the object it
+    /// is inside. An address below the static floor names an object that is
+    /// never collected, and one in no live block — the hole, a free block,
+    /// past the bump — names nothing to keep.
+    fn containers(&self, alloc: &Alloc, layouts: &[Layout], mut interior: Vec<u64>) -> Vec<u64> {
+        interior.sort_unstable();
+        interior.dedup();
+        let mut found = Vec::new();
+        let end = STACK_WORDS + alloc.bump;
+        let mut addr = self.static_end.load(Ordering::Relaxed);
+        let mut at = 0;
+        while addr < end && at < interior.len() {
+            if addr == STACK_WORDS + alloc.hole {
+                addr = STACK_WORDS + CHUNK_WORDS;
+                continue;
+            }
+            let next = addr + self.object_words(layouts, addr);
+            while at < interior.len() && interior[at] < addr {
+                at += 1;
+            }
+            let mut inside = false;
+            while at < interior.len() && interior[at] < next {
+                inside = true;
+                at += 1;
+            }
+            if inside && self.object_layout(addr) != LayoutId::FREE {
+                found.push(addr);
+            }
+            addr = next;
+        }
+        found
     }
 
     /// Marks and enqueues every object the object at `addr` refers to.

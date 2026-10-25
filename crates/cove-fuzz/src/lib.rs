@@ -76,8 +76,12 @@ use cove_sema::{Compiler, Config, HostSchemas, Module, Package, Unit};
 
 pub mod differential;
 pub mod generate;
+pub mod ir;
+pub mod irgen;
+pub mod mutate;
 
 pub use differential::{differential, differential_source};
+pub use ir::{ir, ir_mutate};
 
 /// The module a fuzzed source is compiled as, and the function that is run.
 ///
@@ -127,7 +131,7 @@ pub fn limits() -> Limits {
 }
 
 /// Every target, by the name `fuzz/` and `fuzz/regressions/` give it.
-pub const TARGETS: [&str; 7] = [
+pub const TARGETS: [&str; 9] = [
     "parse",
     "compile",
     "run",
@@ -135,6 +139,8 @@ pub const TARGETS: [&str; 7] = [
     "image",
     "differential",
     "differential_source",
+    "ir",
+    "ir_mutate",
 ];
 
 /// The harness a target name names.
@@ -147,6 +153,8 @@ pub fn harness(target: &str) -> Option<fn(&[u8])> {
         "image" => image,
         "differential" => differential,
         "differential_source" => differential_source,
+        "ir" => ir,
+        "ir_mutate" => ir_mutate,
         _ => return None,
     })
 }
@@ -210,37 +218,45 @@ pub fn structured(data: &[u8]) {
     });
 }
 
-/// Reads `data` as the body of a lowered-IR image with a valid header.
+/// Reads `data` as the body of a lowered-IR image with a valid header, and
+/// runs what it reads if it verifies.
 ///
 /// The header — [`MAGIC`](cove_ir::serial::MAGIC), this build's
 /// [`FINGERPRINT`](cove_ir::serial::FINGERPRINT) and the body's length — is
 /// supplied, because a fuzzer would otherwise spend its whole budget learning
 /// a 64-bit hash and every input would stop at the fingerprint check.
 ///
-/// A decoded program is **verified and not run**. `serial::decode` refuses
-/// bytes it can recognise as wrong and promises never to panic, and it does not
-/// check what the ids in an accepted image mean. `cove_ir::verify` is the
-/// check that does, and it promises to answer for any program `decode`
-/// returns with an `Err`, never a panic ([ADR 0117](../../docs/adr/0117-verify-refuses-a-program-whose-ids-are-out-of-range.md)):
-/// that promise is what this tests, on both halves.
+/// `serial::decode` refuses bytes it can recognise as wrong and promises never
+/// to panic, and it does not check what the ids in an accepted image mean.
+/// `cove_ir::verify` is the check that does, and it promises to answer for any
+/// program `decode` returns with an `Err`, never a panic
+/// ([ADR 0117](../../docs/adr/0117-verify-refuses-a-program-whose-ids-are-out-of-range.md)).
+/// Since [ADR 0120](../../docs/adr/0120-the-vm-runs-only-what-verifies.md) the
+/// machine's contract covers what `verify` accepts, so a decoded program that
+/// verifies is run, in every mode, as the `ir` target runs one
+/// ([`ir::run`]): its entry with a plausible argument for each parameter.
 ///
-/// What is not tested is running a program that verified. `verify` checks that
-/// a program is well formed the way the lowering makes them; it is not a
-/// proof that the VM or the code generator is safe on every program it
-/// accepts, and nobody claims that. If images are ever accepted from anywhere
-/// but this build, that claim has to be made first, and this is where to test
-/// it.
+/// # Panics
+///
+/// On a finding, as [`ir`](fn@ir) does.
 pub fn image(data: &[u8]) {
     let bytes = with_header(data);
     on_stack(move || {
-        if let Ok(image) = cove_ir::serial::decode(&bytes) {
-            let _ = cove_ir::verify(&image.program);
+        let Ok(image) = cove_ir::serial::decode(&bytes) else {
+            return;
+        };
+        if cove_ir::verify(&image.program).is_err() {
+            return;
         }
+        let subject = ir::image_subject(image);
+        let listed = subject.program.clone();
+        let report = ir::run_here(subject);
+        ir::require(|| ir::listing(&listed), &report);
     });
 }
 
 /// `data` behind a header this build's `decode` accepts.
-fn with_header(data: &[u8]) -> Vec<u8> {
+pub(crate) fn with_header(data: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(cove_ir::serial::HEADER_BYTES + data.len());
     bytes.extend_from_slice(&cove_ir::serial::MAGIC);
     bytes.extend_from_slice(&cove_ir::serial::FINGERPRINT.to_le_bytes());

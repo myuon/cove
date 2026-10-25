@@ -28,8 +28,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, BitOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, MinMax, Num,
-    Program, ShiftOp, Slot, Storage, StrId,
+    ArgsId, ArithOp, BitOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, LayoutId, Len,
+    MinMax, Num, Program, ShiftOp, Slot, Storage, StrId,
 };
 
 use crate::abi::{
@@ -49,7 +49,6 @@ use crate::{Unavailable, WindowCode};
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
-const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_DYN_LAYOUTS: i32 = offset_of!(NativeCtx, dyn_layouts) as i32;
 const OFF_DYN_CHILDREN: i32 = offset_of!(NativeCtx, dyn_children) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
@@ -427,6 +426,129 @@ pub struct Jit {
     ///
     /// [ADR 0079]: ../../../../docs/adr/0079-a-direct-call-opens-its-frame-in-emitted-code.md
     inline_frames: bool,
+    /// The tables emitted field, element and byte reads test an object's
+    /// layout against ([ADR 0120]). Owned here because emitted code holds their
+    /// addresses as immediates, so they live as long as the code does.
+    ///
+    /// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    agreements: Agreements,
+}
+
+/// For each kind of access an emitted instruction makes, one byte per layout:
+/// non-zero where an object of that layout may be accessed that way without
+/// asking the runtime ([ADR 0120]).
+///
+/// A field access is `cove_ir::field_agrees`, an element access
+/// `cove_ir::unit_agrees`, a byte read "the object is a byte run": the same
+/// rules the encoded tier's `Machine::field`, `Machine::unit` and
+/// `Machine::is_byte_run` apply, so a layout this table says no to is one the
+/// runtime refuses too, with the runtime's own words. A byte rather than a bit,
+/// so that the test is one load; identical tables are kept once.
+///
+/// Built for the program the [`Jit`] is compiling, which is one program for the
+/// whole of a `Jit`'s life in every caller this crate has. The tables are keyed
+/// by the address and length of that program's layout table and rebuilt if
+/// either changes.
+///
+/// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+#[derive(Default)]
+struct Agreements {
+    of: (usize, usize),
+    access: Vec<Option<Vec<cove_ir::Access>>>,
+    units: Vec<Option<Vec<cove_ir::Repr>>>,
+    tables: std::collections::HashSet<Box<[u8]>>,
+    fields: std::collections::HashMap<(u32, u32, bool), usize>,
+    elements: std::collections::HashMap<u32, usize>,
+    bytes: usize,
+}
+
+impl Agreements {
+    /// The tables of `program`'s layouts, rebuilt if they were another's.
+    fn over(&mut self, program: &Program) {
+        let of = (program.layouts.as_ptr() as usize, program.layouts.len());
+        if self.of == of && !self.access.is_empty() {
+            return;
+        }
+        let layouts = &program.layouts;
+        *self = Agreements {
+            of,
+            access: layouts.iter().map(|l| l.fixed_access(layouts)).collect(),
+            units: layouts
+                .iter()
+                .map(|l| cove_ir::unit_words(layouts, &l.shape))
+                .collect(),
+            ..Agreements::default()
+        };
+    }
+
+    /// The address of a table with these bytes, kept once.
+    fn intern(&mut self, table: Vec<u8>) -> usize {
+        let table = table.into_boxed_slice();
+        if let Some(held) = self.tables.get(&table) {
+            return held.as_ptr() as usize;
+        }
+        let at = table.as_ptr() as usize;
+        self.tables.insert(table);
+        at
+    }
+
+    /// The table of a field access naming `layout` at word `at`.
+    fn field(&mut self, program: &Program, at: u32, layout: LayoutId, store: bool) -> usize {
+        if let Some(held) = self.fields.get(&(at, layout.0, store)) {
+            return *held;
+        }
+        let words = &program.layout(layout).words;
+        let table = self
+            .access
+            .iter()
+            .map(|access| {
+                u8::from(
+                    access
+                        .as_deref()
+                        .is_some_and(|access| cove_ir::admits_field(access, at, words, store)),
+                )
+            })
+            .collect();
+        let table = self.intern(table);
+        self.fields.insert((at, layout.0, store), table);
+        table
+    }
+
+    /// The table of an element access naming `layout`.
+    fn element(&mut self, program: &Program, layout: LayoutId) -> usize {
+        if let Some(held) = self.elements.get(&layout.0) {
+            return *held;
+        }
+        let words = &program.layout(layout).words;
+        let table = self
+            .units
+            .iter()
+            .map(|unit| u8::from(unit.as_deref().is_some_and(|unit| cove_ir::admits_unit(unit, words))))
+            .collect();
+        let table = self.intern(table);
+        self.elements.insert(layout.0, table);
+        table
+    }
+
+    /// The table of a byte read: the byte runs.
+    fn bytes(&mut self, program: &Program) -> usize {
+        if self.bytes != 0 {
+            return self.bytes;
+        }
+        let table = program
+            .layouts
+            .iter()
+            .enumerate()
+            .map(|(at, layout)| {
+                u8::from(
+                    at == program.str_layout.index()
+                        || matches!(layout.shape, cove_ir::Shape::Str | cove_ir::Shape::Bytes),
+                )
+            })
+            .collect();
+        self.bytes = self.intern(table);
+        self.bytes
+    }
 }
 
 /// The helper addresses, as the numbers a `movabs` carries.
@@ -496,6 +618,7 @@ impl Jit {
             finalized: false,
             direct: false,
             inline_frames: false,
+            agreements: Agreements::default(),
         })
     }
 
@@ -542,12 +665,14 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
+        self.agreements.over(program);
         let (code, windows, resumes) = Emit::new(
             program,
             function,
             &self.helpers,
             self.direct,
             self.inline_frames,
+            &mut self.agreements,
         )
         .run();
         dump(id, function, &code);
@@ -695,6 +820,8 @@ struct Fixup {
 struct Emit<'a> {
     program: &'a Program,
     function: &'a Function,
+    /// The [`Jit`]'s tables, which [`Emit::agreeing`] asks for addresses.
+    agreements: &'a mut Agreements,
     safepoint: usize,
     returned: usize,
     call: usize,
@@ -771,12 +898,14 @@ impl<'a> Emit<'a> {
         helpers: &Helpers,
         direct: bool,
         inline_frames: bool,
+        agreements: &'a mut Agreements,
     ) -> Self {
         let blocks = leaders(program, function);
         let windows = windows(program, function, &blocks);
         Emit {
             program,
             function,
+            agreements,
             safepoint: helpers.safepoint,
             returned: helpers.returned,
             call: helpers.call,
@@ -974,8 +1103,11 @@ impl<'a> Emit<'a> {
             }
             // `encoded.rs`'s `ADDR_OF_PART` arm, and the comment there is the
             // whole of it: "Arithmetic and nothing else."
+            // A null address is refused before it is offset, as the encoded
+            // `ADDR_OF_PART` refuses it (ADR 0120): word 0 is a stack word.
             Inst::AddrOfPart { dst, addr, at } => {
                 self.load_slot(RAX, *addr);
+                self.refuse_null(RAX);
                 self.add_imm32(RAX, *at as i32);
                 self.store_slot(*dst, RAX);
             }
@@ -991,7 +1123,7 @@ impl<'a> Emit<'a> {
                 at,
                 layout,
             } => {
-                self.load_field(*dst, *obj, *at, self.program.layout(*layout).width());
+                self.load_field(*dst, *obj, *at, *layout);
             }
             Inst::StoreField {
                 obj,
@@ -999,7 +1131,7 @@ impl<'a> Emit<'a> {
                 src,
                 layout,
             } => {
-                self.store_field(*obj, *at, *src, self.program.layout(*layout).width());
+                self.store_field(*obj, *at, *src, *layout);
             }
             // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
             // the low byte, so that is what is tested here.
@@ -1330,7 +1462,7 @@ impl<'a> Emit<'a> {
                 index,
                 layout,
             } => {
-                self.load_elem(*dst, *obj, *index, self.program.layout(*layout).width());
+                self.load_elem(*dst, *obj, *index, *layout);
             }
             Inst::StoreElem {
                 obj,
@@ -1338,7 +1470,7 @@ impl<'a> Emit<'a> {
                 src,
                 layout,
             } => {
-                self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
+                self.store_elem(*obj, *index, *src, *layout);
             }
             Inst::RunLoad {
                 dst,
@@ -1897,10 +2029,12 @@ impl<'a> Emit<'a> {
     /// that case reachable — `load s3 <- &s1` with the runs overlapping is
     /// something the lowering may emit and does not have to prove it does not.
     fn load_through(&mut self, dst: Slot, addr: Slot, width: u32) {
+        // Null first, whatever the width, as the encoded `LOAD` asks it.
+        self.load_slot(RCX, addr);
+        self.refuse_null(RCX);
         if width == 0 {
             return;
         }
-        self.load_slot(RCX, addr);
         for word in 0..width {
             self.mov_rr(RDX, RCX);
             self.add_imm32(RDX, word as i32);
@@ -1920,6 +2054,9 @@ impl<'a> Emit<'a> {
     /// reason. The address stays in `RCX` across the stores, which nothing in
     /// [`Emit::word_ptr`] touches.
     fn store_through(&mut self, addr: Slot, src: Slot, width: u32) {
+        // Null first, whatever the width, as the encoded `STORE` asks it.
+        self.load_slot(RCX, addr);
+        self.refuse_null(RCX);
         if width == 0 {
             return;
         }
@@ -2249,6 +2386,7 @@ impl<'a> Emit<'a> {
             layout,
             bytes,
             words,
+            store,
             args,
         } = held;
         let cold_family = self.label();
@@ -2322,6 +2460,10 @@ impl<'a> Emit<'a> {
         self.pc = window.write;
         match window.pattern {
             Pattern::PushWords => {
+                // The store is the element's growable run, or the ensure's
+                // reader answers for it (ADR 0120).
+                self.cmp_imm32(HEAP_INDEX, store.0 as i32);
+                self.jcc(CC_NE, Target::Label(cold_room));
                 // `store + 1 + len * stride`: the element's address in the store.
                 self.mov_imm64(RAX, i64::from(window.stride));
                 self.imul_rr(RAX, RDX);
@@ -2397,7 +2539,13 @@ impl<'a> Emit<'a> {
         self.bind(cold_family);
         self.frame_live = false;
         self.pc = window.head;
-        self.field_call(self.field_load, 0, 1, window.at);
+        let head = match self.function.code.get(window.head) {
+            Some(Inst::LoadField { layout, .. }) => *layout,
+            // `legalize::recognize` opens every window with the length's
+            // `load-field`; anything else is a layout the helper refuses.
+            _ => LayoutId(u32::MAX),
+        };
+        self.field_call(self.field_load, 0, head, window.at);
         for pc in window.head + 1..window.ensure {
             self.pc = pc;
             self.inst(pc);
@@ -4075,9 +4223,12 @@ impl<'a> Emit<'a> {
     /// payload offset; `RDX` is where each word is formed. No load is held back
     /// as [`Emit::copy`] holds them back, because the source is the heap and the
     /// destination is the frame: two regions, so there is nothing to overlap.
-    fn load_elem(&mut self, dst: Slot, obj: Slot, index: Slot, width: u32) {
+    fn load_elem(&mut self, dst: Slot, obj: Slot, index: Slot, layout: LayoutId) {
+        let width = self.program.layout(layout).width();
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);
+        let table = self.agreements.element(self.program, layout);
+        self.raise_unless_agreeing(table, Raise::UnitRead, Some(layout));
         self.load_slot(RCX, index);
         self.mov_rr(RDX, RAX);
         self.object_len(RDX);
@@ -4114,9 +4265,12 @@ impl<'a> Emit<'a> {
     /// goes where [`Emit::copy`]'s go. Nothing is *held back* for overlap the way a
     /// copy holds words back: the source is a frame and the destination is the
     /// heap, which are two regions.
-    fn store_elem(&mut self, obj: Slot, index: Slot, src: Slot, width: u32) {
+    fn store_elem(&mut self, obj: Slot, index: Slot, src: Slot, layout: LayoutId) {
+        let width = self.program.layout(layout).width();
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);
+        let table = self.agreements.element(self.program, layout);
+        self.raise_unless_agreeing(table, Raise::UnitWrite, Some(layout));
         self.load_slot(RCX, index);
         self.mov_rr(RDX, RAX);
         self.object_len(RDX);
@@ -4149,6 +4303,8 @@ impl<'a> Emit<'a> {
     fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);
+        let table = self.agreements.bytes(self.program);
+        self.raise_unless_agreeing(table, Raise::NotBytes, None);
         self.load_slot(RCX, at);
         self.mov_rr(RDX, RAX);
         self.object_len(RDX);
@@ -4169,52 +4325,27 @@ impl<'a> Emit<'a> {
         self.store_slot(dst, RDX);
     }
 
-    /// `NativeCtx::fixed_payload_words[layout]`, where `layout` is `reg`'s
-    /// header's high half on entry — `0` for a variable-payload shape.
+    /// `encoded.rs`'s `LOAD_FIELD` arm: `Machine::field` and a copy of `width`
+    /// words out of the object's payload — with the check answered in emitted
+    /// code wherever the object's layout is one [`Agreements`]' table for this
+    /// access says yes to (ADR 0120), and by the helper everywhere else.
     ///
-    /// `reg` holds the object's linear address on entry and the table's answer
-    /// on exit; it must not be `RCX`, which this uses as scratch for the table
-    /// pointer — deliberately not `RAX`, so that a caller keeping the address
-    /// alive in `RAX` across this call still has it afterwards.
-    fn fixed_payload_words(&mut self, reg: u8) {
-        debug_assert!(
-            reg != RCX,
-            "`RCX` is this method's own scratch for the table pointer"
-        );
-        self.heap_word(reg);
-        self.shr_imm8(reg, 32);
-        // Four bytes per `u32` entry, not eight: this table is not `chunks` or
-        // `literals`.
-        self.shl_imm8(reg, 2);
-        // `RCX`, not `RAX`: every caller keeps the object's address in `RAX`
-        // across this call, for the fast-path copy or for `Emit::field_call`
-        // afterwards, and clobbering it here would lose it.
-        self.load(RCX, CTX, OFF_FIXED_PAYLOAD_WORDS);
-        self.add_rr(reg, RCX);
-        self.load32(reg, reg, 0);
-    }
-
-    /// `encoded.rs`'s `LOAD_FIELD` arm: `Machine::checked` and a copy of `width`
-    /// words out of the object's payload — with the bound answered in emitted
-    /// code wherever [`Emit::fixed_payload_words`] can answer it.
-    ///
-    /// `at` and `width` are compile-time constants, so this is one `cmp` against
-    /// an immediate — `Machine::checked`'s `at + width > words` turned around —
-    /// rather than a run-time addition. A `0` table entry is below any non-zero
-    /// `at + width`, which is what sends a variable-payload object to
-    /// [`Emit::field_call`]'s helper without this arm ever asking which shape it
-    /// is.
-    fn load_field(&mut self, dst: Slot, obj: Slot, at: u32, width: u32) {
+    /// `at` and the layout are compile-time constants, so the table is too, and
+    /// the check is one byte load at the object's layout id: yes for every
+    /// fixed-payload layout the field lies inside and agrees with word for word,
+    /// no for everything else — a variable payload, a disagreement, a word the
+    /// machine keeps — which goes to [`Emit::field_call`]'s helper, whose
+    /// answer is the runtime's own.
+    fn load_field(&mut self, dst: Slot, obj: Slot, at: u32, layout: LayoutId) {
+        let width = self.program.layout(layout).width();
         let cold = self.label();
         let done = self.label();
 
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);
 
-        self.mov_rr(RDX, RAX);
-        self.fixed_payload_words(RDX);
-        self.cmp_imm32(RDX, (at + width) as i32);
-        self.jcc(CC_B, Target::Label(cold));
+        let table = self.agreements.field(self.program, at, layout, false);
+        self.agreeing(table, cold);
 
         for word in 0..width {
             self.mov_rr(RDX, RAX);
@@ -4225,24 +4356,23 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.field_call(self.field_load, at, width, dst);
+        self.field_call(self.field_load, at, layout, dst);
         self.bind(done);
         self.frame_live = false;
     }
 
     /// [`Emit::load_field`], the other direction: `encoded.rs`'s `STORE_FIELD`
     /// arm.
-    fn store_field(&mut self, obj: Slot, at: u32, src: Slot, width: u32) {
+    fn store_field(&mut self, obj: Slot, at: u32, src: Slot, layout: LayoutId) {
+        let width = self.program.layout(layout).width();
         let cold = self.label();
         let done = self.label();
 
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);
 
-        self.mov_rr(RDX, RAX);
-        self.fixed_payload_words(RDX);
-        self.cmp_imm32(RDX, (at + width) as i32);
-        self.jcc(CC_B, Target::Label(cold));
+        let table = self.agreements.field(self.program, at, layout, true);
+        self.agreeing(table, cold);
 
         for word in 0..width {
             self.load_slot(RDX, src + word);
@@ -4254,9 +4384,55 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.field_call(self.field_store, at, width, src);
+        self.field_call(self.field_store, at, layout, src);
         self.bind(done);
         self.frame_live = false;
+    }
+
+    /// Jumps to `cold` unless the object in `RAX` has a layout `table` says
+    /// yes to: [`Agreements`]' one-byte test. `RAX` is kept; `RCX` and `RDX`
+    /// are scratch.
+    ///
+    /// A layout id past the table is sent to `cold` as well, where the
+    /// runtime's reader has the whole answer.
+    fn agreeing(&mut self, table: usize, cold: usize) {
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, self.program.layouts.len() as i32);
+        self.jcc(CC_AE, Target::Label(cold));
+        self.mov_imm64(RCX, table as i64);
+        self.add_rr(RDX, RCX);
+        self.load8(RDX, RDX, 0);
+        self.test_rr32(RDX, RDX);
+        self.jcc(CC_E, Target::Label(cold));
+    }
+
+    /// Raises `code` unless the object in `RAX` has a layout `table` says yes
+    /// to, carrying the object's layout out as `raise_a` and `layout`, where
+    /// there is one, as `raise_b`: the runtime words the refusal from the two.
+    /// `RAX` is kept; `RCX` and `RDX` are scratch.
+    fn raise_unless_agreeing(&mut self, table: usize, code: Raise, layout: Option<LayoutId>) {
+        let fine = self.label();
+        let refuse = self.label();
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, self.program.layouts.len() as i32);
+        self.jcc(CC_AE, Target::Label(refuse));
+        self.mov_imm64(RCX, table as i64);
+        self.add_rr(RCX, RDX);
+        self.load8(RCX, RCX, 0);
+        self.test_rr32(RCX, RCX);
+        self.jcc(CC_NE, Target::Label(fine));
+        self.bind(refuse);
+        self.store(CTX, OFF_RAISE_A, RDX);
+        if let Some(layout) = layout {
+            self.mov_imm64(RDX, i64::from(layout.0));
+            self.store(CTX, OFF_RAISE_B, RDX);
+        }
+        self.raise(code);
+        self.bind(fine);
     }
 
     /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
@@ -4270,14 +4446,14 @@ impl<'a> Emit<'a> {
     /// **before** `RDI`/`RSI` are clobbered, because it is itself built out of
     /// the heap scratch trio; and `RAX` moves into `RDX` before `RAX` is spent on
     /// the callee's own address, because both name the same register.
-    fn field_call(&mut self, target: usize, at: u32, width: u32, slot: u32) {
+    fn field_call(&mut self, target: usize, at: u32, layout: LayoutId, slot: u32) {
         self.frame_addr(R9);
         self.add_imm32(R9, slot as i32);
         self.mov_rr(RDX, RAX);
         self.mov_rr(RDI, CTX);
         self.mov_imm32(RSI, self.pc as i32);
         self.mov_imm32(RCX, at as i32);
-        self.mov_imm32(R8, width as i32);
+        self.mov_imm32(R8, layout.0 as i32);
         self.mov_imm64(RAX, target as i64);
         self.call(RAX);
 
@@ -5453,15 +5629,6 @@ impl<'a> Emit<'a> {
     /// `mov r64, [base + disp]`
     fn load(&mut self, dst: u8, base: u8, disp: i32) {
         self.rex(true, dst, base);
-        self.byte(0x8b);
-        self.modrm_mem(dst, base, disp);
-    }
-
-    /// `mov r32, [base + disp]`, which zeroes the upper half of `dst` — the
-    /// zero-extending load a table of `u32` entries needs, [`Emit::object_len`]'s
-    /// `mov_rr32` in memory-operand form.
-    fn load32(&mut self, dst: u8, base: u8, disp: i32) {
-        self.rex(false, dst, base);
         self.byte(0x8b);
         self.modrm_mem(dst, base, disp);
     }

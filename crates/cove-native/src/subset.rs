@@ -535,6 +535,13 @@ pub(crate) struct BufferWindow {
     /// Whether the storage is words, so that the emitter picks the cold ensure and
     /// masks the length word at the element's stride.
     pub(crate) words: bool,
+    /// For a word push, the growable `Shape::Elements` layout the store's
+    /// header is compared against before a unit is written into it: an
+    /// owner's store word is a field the lowering stores, so it is the
+    /// element run only if its header says so ([ADR 0120]). Unread otherwise.
+    ///
+    /// [ADR 0120]: ../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    pub(crate) store: LayoutId,
     /// An append's `run-copy` argument row. Unread for a push.
     pub(crate) args: u32,
 }
@@ -584,11 +591,25 @@ fn buffer_window(
         Inst::RunCopy { args, .. } => args.0,
         _ => 0,
     };
+    // The first growable run of the element, as `cove-runtime`'s `word_runs`
+    // keeps the first: a store of another layout of the same shape is sent to
+    // the cold ensure, whose reader answers it.
+    let store = match window.storage {
+        Storage::Words(elem) => program
+            .layouts
+            .iter()
+            .position(|layout| {
+                matches!(layout.shape, Shape::Elements { elem: e, growable: true } if e == elem)
+            })
+            .map_or(LayoutId(0), |at| LayoutId(at as u32)),
+        Storage::PackedBytes => LayoutId(0),
+    };
     Some(BufferWindow {
         window,
         layout: reserve.layout,
         bytes,
         words: reserve.words,
+        store,
         args,
     })
 }
