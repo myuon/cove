@@ -752,6 +752,10 @@ size for that reason, and the mutation experiment in
 generator on purpose, to measure whether the harness notices them — by the
 dedicated tests, by replaying an existing corpus, and by a new session —
 and `scripts/fuzz-mutant-experiment.sh <name>` is the experiment.
+`scripts/fuzz-mutant-campaign.sh --out DIR` runs it for every mutant under one
+budget (10 sessions × 45 s per target by default) and
+`scripts/fuzz-mutant-table.py DIR` tabulates the reports (FUZZ_EVALUATION.md,
+section 10).
 [FUZZ_EVALUATION.md](FUZZ_EVALUATION.md), section 4, has the method and the
 results. A mutant is never applied to this tree: `scripts/fuzz-mutant.sh
 apply` makes a scratch worktree under `fuzz/measure/` and applies it there,

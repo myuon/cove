@@ -1,0 +1,23 @@
+# 012-vm-byte-at-off-by-one
+#
+# The encoded VM's `byteAt` admits an offset equal to the string's byte
+# length and reads the padding byte past the end, where the interpreter
+# and the native tier refuse. Wrong only on that offset, in encoded code.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/exec/encoded.rs b/crates/cove-runtime/src/vm/exec/encoded.rs
+index 116276dd..6d4ad7b2 100644
+--- a/crates/cove-runtime/src/vm/exec/encoded.rs
++++ b/crates/cove-runtime/src/vm/exec/encoded.rs
+@@ -3608,7 +3608,8 @@ pub(super) fn dispatch<'s, 'a>(
+                 }
+                 let at = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                 let len = machine.mem.object_len(addr) as i64;
+-                if at < 0 || at >= len {
++                // COVE-MUTANT 012-vm-byte-at-off-by-one
++                if at < 0 || at > len {
+                     machine.sync(pc - 1);
+                     fail!(RuntimeError::new(format!(
+                         "`byteAt` is `{at}`, and a byte offset into this string is 0 to {}",

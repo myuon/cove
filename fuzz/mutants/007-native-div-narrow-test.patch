@@ -1,0 +1,23 @@
+# 007-native-div-narrow-test
+#
+# Native `Int` division and remainder take the 32-bit `div` path when
+# both operands are below 2^33 rather than 2^32, so an operand in
+# [2^32, 2^33) is truncated. Wrong only on such an operand.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+index 8fac2d8c..585132cd 100644
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -4305,7 +4305,8 @@ impl<'a> Emit<'a> {
+                 let done = self.label();
+                 self.mov_rr(RDX, RAX);
+                 self.or_rr(RDX, RCX);
+-                self.shr_imm8(RDX, 32);
++                // COVE-MUTANT 007-native-div-narrow-test
++                self.shr_imm8(RDX, 33);
+                 self.jcc(CC_NE, Target::Label(wide));
+                 self.xor_rr(RDX, RDX);
+                 self.div32(RCX);

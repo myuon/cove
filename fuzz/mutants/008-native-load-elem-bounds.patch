@@ -1,0 +1,22 @@
+# 008-native-load-elem-bounds
+#
+# Native `LoadElem` admits an index equal to the length: it reads the
+# word past the last element where the VM refuses. Wrong only on an
+# index equal to the length, in compiled code.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+index 8fac2d8c..0a7104bb 100644
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -3987,6 +3987,8 @@ impl<'a> Emit<'a> {
+         self.load_slot(RCX, index);
+         self.mov_rr(RDX, RAX);
+         self.object_len(RDX);
++        // COVE-MUTANT 008-native-load-elem-bounds
++        self.add_imm32(RDX, 1);
+         self.raise_unless_below(Raise::IndexOutOfRange, RCX, RDX);
+         // The stride, which is what makes an `Array<Point>` a run of two-word
+         // elements. `Machine::element` multiplies in `u32`; this multiplies in
