@@ -1398,6 +1398,7 @@ mod tests {
             native_calls: mode.heap_words().map(|_| 0),
             collections_while_compiled: mode.heap_words().map(|_| 0),
             instructions: mode.heap_words().map(|_| 1),
+            literal_words: mode.heap_words().map(|_| 0),
         }
     }
 

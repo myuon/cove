@@ -948,6 +948,18 @@ impl<'a> Vm<'a> {
         self.machine.heap_words()
     }
 
+    /// Words of the heap the program's literals took before its first
+    /// instruction — the run's immortal floor — or nought if no run has
+    /// started.
+    ///
+    /// A heap's capacity is shared between these and what the run allocates,
+    /// so an embedder or a test sizing a small heap to make a run collect
+    /// sizes it as this plus an allowance: a capacity below this is a run
+    /// that runs out of memory before it does anything (issue #724).
+    pub fn literal_words(&self) -> u64 {
+        self.machine.literal_words()
+    }
+
     /// Words handed out over the whole run, reuse counted each time.
     pub fn allocated_words(&self) -> u64 {
         self.machine.allocated_words()

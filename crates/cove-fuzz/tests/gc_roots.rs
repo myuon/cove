@@ -46,12 +46,20 @@
 //!
 //! [issue 681]: https://github.com/myuon/cove/issues/681
 
-use cove_fuzz::differential::{probe, Mode, GC_HEAP_WORDS};
+use cove_fuzz::differential::{gc_heap_words, probe, Mode, GC_ALLOWANCE_WORDS};
 use cove_runtime::trace::RunOutcome;
 
-/// The heap the compiled runs are made over: the differential targets'
-/// small one, on which these programs collect several times.
-const SMALL: usize = GC_HEAP_WORDS;
+/// The heap the interpreter's run is given, which it ignores: it has none.
+const SMALL: usize = GC_ALLOWANCE_WORDS;
+
+/// The heap the compiled runs of `text` are made over: the differential
+/// targets' small one ([`gc_heap_words`], ADR 0124) — the literals the
+/// program places on `vm`, and `GC_ALLOWANCE_WORDS` above them — on which these
+/// programs collect several times.
+fn small_heap(text: &str) -> usize {
+    let vm = probe(text, Mode::Vm, LARGE, &[]).expect("it checks");
+    gc_heap_words(vm.observed.literal_words.expect("a lowered mode counts"))
+}
 
 /// The heap the encoded run is made over for its instruction count: the
 /// harness's ordinary one.
@@ -153,7 +161,8 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
             case.name
         );
 
-        let native = probe(&text, Mode::Native, SMALL, case.holders).expect("it checks");
+        let small = small_heap(&text);
+        let native = probe(&text, Mode::Native, small, case.holders).expect("it checks");
         let o = &native.observed;
         // 2. The holders are functions of their own, and compiled.
         for (name, kept, compiled) in &native.functions {
@@ -187,7 +196,7 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
         let control = probe(
             &text.replace(LOOP, NO_LOOP),
             Mode::Native,
-            SMALL,
+            small,
             case.holders,
         )
         .expect("it checks");
@@ -216,9 +225,9 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
         assert_eq!(vm.observed.stdout, o.stdout, "{}", case.name);
         // What was measured, for `--nocapture` and docs/FUZZ_EVALUATION.md.
         eprintln!(
-            "{}: {} collections, {under} under a compiled frame ({without} without the loop); \
-             encoded instructions {encoded_native} on native, {encoded_vm} on vm; {} calls \
-             entered compiled code",
+            "{}: heap {small} words; {} collections, {under} under a compiled frame ({without} \
+             without the loop); encoded instructions {encoded_native} on native, {encoded_vm} on \
+             vm; {} calls entered compiled code",
             case.name,
             o.collections.unwrap_or(0),
             o.native_calls.unwrap_or(0),

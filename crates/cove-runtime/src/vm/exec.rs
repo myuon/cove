@@ -1825,6 +1825,11 @@ impl<'a> Machine<'a> {
         self.mem.heap_words()
     }
 
+    /// Words the program's literals took before the first instruction.
+    pub(crate) fn literal_words(&self) -> u64 {
+        self.mem.literal_words()
+    }
+
     /// Words handed out over the whole run, reuse counted each time.
     pub(crate) fn allocated_words(&self) -> u64 {
         self.mem.allocated_words()

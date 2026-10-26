@@ -2101,6 +2101,15 @@ impl Space {
         occupied(alloc.bump, alloc.hole)
     }
 
+    /// Words below the run's immortal floor (see [`Space::seal_static`]):
+    /// what the program's literals took before its first instruction, the
+    /// hole not counted. Nought before the floor is raised.
+    fn literal_words(&self) -> u64 {
+        let static_end = self.static_end.load(Ordering::Relaxed);
+        let alloc = self.allocator();
+        occupied(static_end - STACK_WORDS, alloc.hole)
+    }
+
     /// Words handed out over the whole run, reuse counted each time.
     fn allocated_words(&self) -> u64 {
         self.allocator().allocated_words
@@ -2934,6 +2943,12 @@ impl Memory {
     /// Words the heap region occupies, free blocks included.
     pub(crate) fn heap_words(&self) -> u64 {
         self.space.heap_words()
+    }
+
+    /// Words the program's literals took before the first instruction. See
+    /// [`Space::literal_words`].
+    pub(crate) fn literal_words(&self) -> u64 {
+        self.space.literal_words()
     }
 
     /// Words handed out over the whole run, reuse counted each time.

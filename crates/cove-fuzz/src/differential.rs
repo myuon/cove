@@ -10,7 +10,7 @@
 //! | `ast` | the tree-walking [`Interpreter`] — ADR 0034's oracle | the checked program |
 //! | `vm` | the encoded VM, through [`OwnedVm`], over a [`HEAP_WORDS`] heap | `cove_ir::lower_entry` |
 //! | `native` | the same, with [`PreparedProgram::with_native`] — the template tier where it compiles a function, the encoded VM where it refuses one | the same |
-//! | `vm-gc` | the encoded VM over a [`GC_HEAP_WORDS`] heap, so that a program that allocates at all collects | the same |
+//! | `vm-gc` | the encoded VM over a small heap — the program's literals and [`GC_ALLOWANCE_WORDS`] more ([`gc_heap_words`]) — so that a program that allocates at all collects | the same |
 //! | `native-gc` | the native tier over the same small heap: compiled frames' roots at a collection | the same |
 //! | `image` | the encoded VM over the program read back from `cove_ir::serial` — the path `cove fmt` runs | `serial::decode(serial::encode(..))` |
 //!
@@ -118,19 +118,43 @@ use cove_runtime::{
 use crate::stats::{self, Classification};
 use crate::{front, limits, on_stack, Lowered, ENTRY, HEAP_WORDS, MODULE};
 
-/// The heap `vm-gc` and `native-gc` run over: 2^11 words, 16 KiB.
+/// What `vm-gc` and `native-gc` may allocate above the program's literals:
+/// 2^9 words, 4 KiB. Their heap is [`gc_heap_words`] of the literals.
 ///
 /// The collector is paced (ADR 0081): it collects once a run has allocated a
 /// chunk's worth — 8,192 words — since the last collection, or when an
 /// allocation does not fit the heap's capacity. Generated programs allocate
 /// less than a chunk, so at 2^14 words or more almost none of them collected
 /// at all (measured over sixty random inputs: four did); the capacity is what
-/// has to be small. 2^11 still holds what a lowered program carries before
-/// its first instruction — its literals, of which `std.float`'s table of
-/// powers of five is the largest at about 1,200 words — and a program that
-/// needs more stops with the out-of-memory refusal, which is a stop and not a
-/// finding.
-pub const GC_HEAP_WORDS: usize = 1 << 11;
+/// has to be small.
+///
+/// It used to be the whole capacity, 2^11 words ([ADR 0113]), on the
+/// reasoning that 2^11 still holds what a lowered program carries before its
+/// first instruction — its literals, of which `std.float`'s table of powers of
+/// five is the largest at about 1,200 words. It did not always: 3–7% of a
+/// `differential` session's small-heap runs ran out of memory before their
+/// first instruction, and those runs compared no output at all. And what a
+/// run could allocate before collecting was whatever its literals left, which
+/// differed from program to program. So the capacity is now the literals and
+/// a fixed allowance above them ([ADR 0124]; issue 724). The allowance is
+/// 2^9 because, replaying one session's grown `differential` corpus, 2^11
+/// above the literals collected in 125 programs where the old capacity had
+/// collected in 367, 2^10 in 299, 2^9 in 477 and 2^8 in 702 — and 2^8 ran
+/// out of memory in 79 against 2^9's 57 (and the old capacity's 169). A run
+/// that allocates more than this, live, still runs out, and `vm-gc` and
+/// `native-gc`, which share the capacity, are compared on it in full.
+///
+/// [ADR 0113]: ../../../docs/adr/0113-differential-fuzzing-compares-six-modes-and-a-stopped-run-by-its-prefix.md
+/// [ADR 0124]: ../../../docs/adr/0124-the-small-heap-is-sized-from-the-program-s-literals.md
+pub const GC_ALLOWANCE_WORDS: usize = 1 << 9;
+
+/// The capacity of `vm-gc`'s and `native-gc`'s heap for a program whose
+/// literals take `literal_words` (`OwnedVm::literal_words`, read from the
+/// `vm` run, which places the same literals): those, and
+/// [`GC_ALLOWANCE_WORDS`] above them.
+pub fn gc_heap_words(literal_words: u64) -> usize {
+    literal_words as usize + GC_ALLOWANCE_WORDS
+}
 
 /// One way of running a program.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,12 +198,14 @@ impl Mode {
     }
 
     /// The capacity of the heap the mode runs over, or `None` for the
-    /// interpreter, which has none.
+    /// interpreter, which has none. For the two small-heap modes it is the
+    /// allowance above the literals ([`gc_heap_words`]): what two modes
+    /// compare equal on here is whether they share a capacity.
     pub fn heap_words(self) -> Option<usize> {
         match self {
             Mode::Ast => None,
             Mode::Vm | Mode::Native | Mode::Image | Mode::Again => Some(HEAP_WORDS),
-            Mode::VmGc | Mode::NativeGc => Some(GC_HEAP_WORDS),
+            Mode::VmGc | Mode::NativeGc => Some(GC_ALLOWANCE_WORDS),
         }
     }
 }
@@ -219,6 +245,10 @@ pub struct Observed {
     /// ran; on a native mode it leaves out what compiled code ran. Never
     /// compared.
     pub instructions: Option<u64>,
+    /// Heap words the program's literals took before its first instruction
+    /// (`OwnedVm::literal_words`), for the lowered modes: what the small heap
+    /// is sized from. Never compared.
+    pub literal_words: Option<u64>,
 }
 
 /// How one run ended, in the kinds a full comparison is told apart by
@@ -570,13 +600,8 @@ fn run_every_mode(lowered: Lowered) -> Report {
         }
         Err(why) => skipped.push((Mode::Native, why.to_string())),
     }
-    observed.push(lowered_run(
-        Mode::VmGc,
-        &checked,
-        &sources,
-        encoded,
-        GC_HEAP_WORDS,
-    ));
+    let small = gc_heap_words(observed[0].literal_words.unwrap_or(0));
+    observed.push(lowered_run(Mode::VmGc, &checked, &sources, encoded, small));
     match &native {
         Ok(native) => {
             observed.push(lowered_run(
@@ -584,7 +609,7 @@ fn run_every_mode(lowered: Lowered) -> Report {
                 &checked,
                 &sources,
                 native.clone(),
-                GC_HEAP_WORDS,
+                small,
             ));
         }
         Err(why) => skipped.push((Mode::NativeGc, why.to_string())),
@@ -782,12 +807,14 @@ fn lowered_run(
     let native_calls = vm.tiers().native();
     let under_compiled = vm.collections_while_compiled();
     let instructions = vm.instructions();
+    let literal_words = vm.literal_words();
     drop(vm);
     let mut observed = observe(mode, answer, &out, &err);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
     observed.collections_while_compiled = Some(under_compiled);
     observed.instructions = Some(instructions);
+    observed.literal_words = Some(literal_words);
     observed
 }
 
@@ -820,6 +847,7 @@ pub(crate) fn observe(
         native_calls: None,
         collections_while_compiled: None,
         instructions: None,
+        literal_words: None,
     }
 }
 
@@ -985,6 +1013,7 @@ mod tests {
             native_calls: None,
             collections_while_compiled: None,
             instructions: None,
+            literal_words: None,
         }
     }
 
