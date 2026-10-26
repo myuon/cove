@@ -96,6 +96,26 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
+      # The nightly corpus only grows (nothing minimises it yet, issue 709),
+      # and libFuzzer runs every input of it before the session's own clock
+      # starts: a 2,790-input `differential_source` corpus took 1,102 s of a
+      # 60 s smoke and ran the job past its 25 minutes. The smoke never saves,
+      # so it keeps an evenly spaced sample of at most 300 inputs, chosen by
+      # name and therefore the same on every run of one restored corpus.
+      - name: Sample the corpus for the smoke
+        if: github.event_name == 'pull_request'
+        run: |
+          dir="fuzz/corpus/${{ matrix.target }}"
+          [ -d "$dir" ] || exit 0
+          total=$(find "$dir" -type f | wc -l)
+          keep=300
+          if [ "$total" -gt "$keep" ]; then
+            find "$dir" -type f | LC_ALL=C sort \
+              | awk -v n="$total" -v k="$keep" '(NR - 1) % int((n + k - 1) / k) != 0' \
+              | xargs rm -f
+          fi
+          echo "corpus: kept $(find "$dir" -type f | wc -l) of $total inputs"
+
       - name: Seed the corpus
         run: scripts/fuzz-seed-corpus.sh ${{ matrix.target }}
 
