@@ -10,7 +10,7 @@
 //! | `ast` | the tree-walking [`Interpreter`] — ADR 0034's oracle | the checked program |
 //! | `vm` | the encoded VM, through [`OwnedVm`], over a [`HEAP_WORDS`] heap | `cove_ir::lower_entry` |
 //! | `native` | the same, with [`PreparedProgram::with_native`] — the template tier where it compiles a function, the encoded VM where it refuses one | the same |
-//! | `vm-gc` | the encoded VM over a small heap — the program's literals and [`GC_HEAP_WORDS`] more ([`gc_heap_words`]) — so that a program that allocates at all collects | the same |
+//! | `vm-gc` | the encoded VM over a small heap — the program's literals and [`GC_ALLOWANCE_WORDS`] more ([`gc_heap_words`]) — so that a program that allocates at all collects | the same |
 //! | `native-gc` | the native tier over the same small heap: compiled frames' roots at a collection | the same |
 //! | `image` | the encoded VM over the program read back from `cove_ir::serial` — the path `cove fmt` runs | `serial::decode(serial::encode(..))` |
 //!
@@ -119,7 +119,7 @@ use crate::stats::{self, Classification};
 use crate::{front, limits, on_stack, Lowered, ENTRY, HEAP_WORDS, MODULE};
 
 /// What `vm-gc` and `native-gc` may allocate above the program's literals:
-/// 2^11 words, 16 KiB. Their heap is [`gc_heap_words`] of the literals.
+/// 2^9 words, 4 KiB. Their heap is [`gc_heap_words`] of the literals.
 ///
 /// The collector is paced (ADR 0081): it collects once a run has allocated a
 /// chunk's worth — 8,192 words — since the last collection, or when an
@@ -128,26 +128,32 @@ use crate::{front, limits, on_stack, Lowered, ENTRY, HEAP_WORDS, MODULE};
 /// at all (measured over sixty random inputs: four did); the capacity is what
 /// has to be small.
 ///
-/// It used to be the whole capacity ([ADR 0113]), on the reasoning that 2^11
-/// still holds what a lowered program carries before its first instruction —
-/// its literals, of which `std.float`'s table of powers of five is the
-/// largest at about 1,200 words. It did not always: 3.7–5.9% of a
+/// It used to be the whole capacity, 2^11 words ([ADR 0113]), on the
+/// reasoning that 2^11 still holds what a lowered program carries before its
+/// first instruction — its literals, of which `std.float`'s table of powers of
+/// five is the largest at about 1,200 words. It did not always: 3–7% of a
 /// `differential` session's small-heap runs ran out of memory before their
-/// first instruction, and those runs compared no output at all ([ADR 0124];
-/// issue 724). A run that allocates more than this above its literals still
-/// runs out, and `vm-gc` and `native-gc`, which share the capacity, are still
-/// compared on it in full.
+/// first instruction, and those runs compared no output at all. And what a
+/// run could allocate before collecting was whatever its literals left, which
+/// differed from program to program. So the capacity is now the literals and
+/// a fixed allowance above them ([ADR 0124]; issue 724). The allowance is
+/// 2^9 because, replaying one session's grown `differential` corpus, 2^11
+/// above the literals collected in 125 programs where the old capacity had
+/// collected in 367, 2^10 in 299, 2^9 in 477 and 2^8 in 702 — and 2^8 ran
+/// out of memory in 79 against 2^9's 57 (and the old capacity's 169). A run
+/// that allocates more than this, live, still runs out, and `vm-gc` and
+/// `native-gc`, which share the capacity, are compared on it in full.
 ///
 /// [ADR 0113]: ../../../docs/adr/0113-differential-fuzzing-compares-six-modes-and-a-stopped-run-by-its-prefix.md
 /// [ADR 0124]: ../../../docs/adr/0124-the-small-heap-is-sized-from-the-program-s-literals.md
-pub const GC_HEAP_WORDS: usize = 1 << 11;
+pub const GC_ALLOWANCE_WORDS: usize = 1 << 9;
 
 /// The capacity of `vm-gc`'s and `native-gc`'s heap for a program whose
 /// literals take `literal_words` (`OwnedVm::literal_words`, read from the
-/// `vm` run, which places the same literals): those, and [`GC_HEAP_WORDS`]
-/// above them.
+/// `vm` run, which places the same literals): those, and
+/// [`GC_ALLOWANCE_WORDS`] above them.
 pub fn gc_heap_words(literal_words: u64) -> usize {
-    literal_words as usize + GC_HEAP_WORDS
+    literal_words as usize + GC_ALLOWANCE_WORDS
 }
 
 /// One way of running a program.
@@ -199,7 +205,7 @@ impl Mode {
         match self {
             Mode::Ast => None,
             Mode::Vm | Mode::Native | Mode::Image | Mode::Again => Some(HEAP_WORDS),
-            Mode::VmGc | Mode::NativeGc => Some(GC_HEAP_WORDS),
+            Mode::VmGc | Mode::NativeGc => Some(GC_ALLOWANCE_WORDS),
         }
     }
 }

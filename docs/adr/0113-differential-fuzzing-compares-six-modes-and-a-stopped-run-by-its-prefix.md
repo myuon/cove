@@ -1,6 +1,9 @@
 # ADR 0113: Differential fuzzing compares six modes, and a stopped run by its prefix
 
 - Status: Accepted
+- Superseded in part by [ADR 0124](0124-the-small-heap-is-sized-from-the-program-s-literals.md),
+  which sizes `vm-gc`'s and `native-gc`'s heap as the program's literals and
+  2^11 words above them, where Decision 1 made it 2^11 words in all
 - Date: 2026-10-24
 - Decides: that `crates/cove-fuzz` gains two differential targets,
   `differential` (generated programs) and `differential_source` (sources),
