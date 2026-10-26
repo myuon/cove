@@ -25,6 +25,29 @@
 //! Now and then — `Gen::wild` — an operand is chosen with no regard to what
 //! the instruction needs, so that the refusals are exercised too.
 //!
+//! # Two profiles: free, and compiled
+//!
+//! A *free* program draws every kind of instruction, jumps backwards as
+//! readily as forwards, and does its work in its entry. That is what the
+//! verifier and the deadline are tested on, and it is kept. But the entry is
+//! the outermost frame, which always runs on the encoded VM, and a free
+//! helper holds a host, task or scope slot or a refused instruction often
+//! enough that the native tier compiled one in a few programs in a thousand
+//! (docs/FUZZ_EVALUATION.md, sections 1 and 2): the native modes compared the
+//! encoded VM with itself.
+//!
+//! A *compiled* program (issue 723) is shaped for the native tier instead.
+//! Its helpers draw only the kinds the tier compiles ([`COMPILED_KINDS`]),
+//! hold no slot of a `Repr` it refuses, jump only forwards, call only
+//! helpers declared after them (so a run ends), and may close a counted loop
+//! of their own; its entry calls the helpers from a counted loop, so the
+//! calls cross from the encoded VM into machine code and the helpers call
+//! each other inside it, and folds what each call answers into the `Int` it
+//! returns, so that a wrong answer in compiled code changes the run's answer.
+//! The profile is chosen by the input's first byte (see [`is_compiled`]),
+//! which nothing else consumes, so the inputs committed before it was added
+//! still build the programs they built.
+//!
 //! # Every instruction
 //!
 //! [`Kind`] names every [`Inst`] variant, and [`kind_of`] maps an instruction
@@ -393,6 +416,80 @@ pub const KINDS: [Kind; 87] = [
     Kind::AssertFailed,
 ];
 
+/// The kinds a compiled program's functions draw from: what
+/// `cove_native`'s subset admits, less `Switch` (whose table targets are
+/// resolved modulo the body's length, so may point backwards). Arithmetic,
+/// comparisons, calls and allocation are listed twice, which doubles how
+/// often they are drawn: they are what the tier's code generator is most
+/// often asked to get right.
+pub const COMPILED_KINDS: [Kind; 47] = [
+    Kind::Unit,
+    Kind::Bool,
+    Kind::Int,
+    Kind::Int,
+    Kind::Tag,
+    Kind::Float,
+    Kind::Str,
+    Kind::Copy,
+    Kind::Clear,
+    Kind::Neg,
+    Kind::Arith,
+    Kind::Arith,
+    Kind::Cmp,
+    Kind::Cmp,
+    Kind::ArithImm,
+    Kind::ArithImm,
+    Kind::CmpImm,
+    Kind::Not,
+    Kind::Convert,
+    Kind::FloatAbs,
+    Kind::FloatMinMax,
+    Kind::FloatRound,
+    Kind::FloatSqrt,
+    Kind::FloatTruncate,
+    Kind::Bits,
+    Kind::BitNot,
+    Kind::Shift,
+    Kind::Jump,
+    Kind::BranchFalse,
+    Kind::CmpBranch,
+    Kind::CmpImmBranch,
+    Kind::Call,
+    Kind::Call,
+    Kind::Alloc,
+    Kind::Alloc,
+    Kind::LoadField,
+    Kind::StoreField,
+    Kind::LoadElem,
+    Kind::StoreElem,
+    Kind::Len,
+    Kind::AddrOfSlot,
+    Kind::AddrOfPart,
+    Kind::Load,
+    Kind::Store,
+    Kind::RunLoad,
+    Kind::FuncRef,
+    Kind::CmpImmBranch,
+];
+
+/// Whether the input builds a compiled program (see the module
+/// documentation): its first byte is 2, 3 or 5 modulo 8.
+///
+/// The first byte, and not one more drawn from the input, because drawing
+/// one would shift every later choice and so change the program every input
+/// committed before this profile existed builds; and 2, 3 and 5 because no
+/// committed `ir` input (`fuzz/seeds/ir`, `fuzz/regressions/ir`) begins with
+/// one of them, which `tests/regressions.rs` holds. Three residues of eight is
+/// three eighths of the inputs a fuzzer makes from nothing.
+pub fn is_compiled(data: &[u8]) -> bool {
+    matches!(data.first().map(|b| b % 8), Some(2 | 3 | 5))
+}
+
+/// The `Repr`s the native tier refuses a frame for holding.
+fn refused_by_native(repr: Repr) -> bool {
+    matches!(repr, Repr::Host | Repr::Task | Repr::Scope)
+}
+
 /// The kind of `inst`. No wildcard arm: a new [`Inst`] variant is a compile
 /// error here until it is given a [`Kind`], and then one in `Body::emit`
 /// until it is generated.
@@ -532,6 +629,8 @@ pub struct Gen<'a> {
     vectors: Vec<(LayoutId, LayoutId)>,
     /// See `Gen::wild`.
     wild_programs: bool,
+    /// The compiled profile: see the module documentation.
+    compiled: bool,
 }
 
 impl<'a> Gen<'a> {
@@ -539,10 +638,12 @@ impl<'a> Gen<'a> {
     pub fn new(data: &'a [u8]) -> Gen<'a> {
         let mut u = Unstructured::new(data);
         let wild_programs = u.ratio(1, 6).unwrap_or(false);
-        Gen {
+        let compiled = !wild_programs && is_compiled(data);
+        let mut g = Gen {
             u,
             vectors: Vec::new(),
             wild_programs,
+            compiled,
             layouts: base_layouts(),
             strings: TEXTS.iter().map(|t| Arc::from(*t)).collect(),
             args: Vec::new(),
@@ -578,7 +679,13 @@ impl<'a> Gen<'a> {
             elements: vec![STR],
             closures: Vec::new(),
             owned_tables: Vec::new(),
+        };
+        if compiled {
+            // A frame location of one of these is a function the tier
+            // refuses whole.
+            g.values.retain(|id| ![HOST, TASK, SCOPE].contains(id));
         }
+        g
     }
 
     // ---- choices ----------------------------------------------------------
@@ -630,12 +737,20 @@ impl<'a> Gen<'a> {
     fn program(mut self) -> Subject {
         self.declare_layouts();
         self.declare_host_ops();
-        let count = 1 + self.below(5);
+        // A compiled program has an entry and at least one helper for it to
+        // call.
+        let count = if self.compiled {
+            2 + self.below(4)
+        } else {
+            1 + self.below(5)
+        };
         for at in 0..count {
             let sig = self.signature(at == 0);
             self.sigs.push(sig);
         }
-        self.declare_closures();
+        if !self.compiled {
+            self.declare_closures();
+        }
         for _ in &self.sigs {
             self.owned_tables.push(Vec::new());
         }
@@ -680,11 +795,19 @@ impl<'a> Gen<'a> {
             resource_names: Vec::new(),
             by_name,
         };
+        // A refused argument — `Unit` where the entry wants something else —
+        // is a run that never starts, so only a wild program draws one. It
+        // used to be one argument in eight of every program, and more than
+        // that in fact: an input the generator has used up answers every
+        // `ratio` with `true`, so 119 of the 473 programs that verified over
+        // `ir-stats`' first thousand inputs were refused at the boundary and
+        // ran nothing (issue 723).
+        let wild = self.wild_programs;
         let mut u = self.u;
         let args = entry_params
             .iter()
             .map(|layout| {
-                if u.ratio(1, 8).unwrap_or(false) {
+                if wild && u.ratio(1, 8).unwrap_or(false) {
                     Arg::Unit
                 } else {
                     match crate::ir::plausible_arg(&program, *layout) {
@@ -811,6 +934,18 @@ impl<'a> Gen<'a> {
 
     /// A layout a field, a part or an element may have.
     fn value_for_field(&mut self) -> LayoutId {
+        if self.compiled {
+            let layout = self.value_for_field_free();
+            let refused = self.layouts[layout.index()]
+                .words
+                .iter()
+                .any(|r| refused_by_native(*r));
+            return if refused { INT } else { layout };
+        }
+        self.value_for_field_free()
+    }
+
+    fn value_for_field_free(&mut self) -> LayoutId {
         let choices = [
             INT, INT, FLOAT, BOOL, STR, STR, UNIT, DURATION, TAG, HOST, BOXED, ERROR, OPTION_INT,
             FN_VALUE, ARRAY_STR, REF,
@@ -875,7 +1010,10 @@ impl<'a> Gen<'a> {
         if !entry && self.chance(1, 5) {
             params.push(ADDR);
         }
-        let returns = if entry {
+        let returns = if entry && self.compiled {
+            // The `Int` the entry folds its calls' answers into.
+            INT
+        } else if entry {
             self.pick(&[UNIT, INT, STR, RESULT_UNIT, OPTION_INT, FLOAT, BOOL, ERROR])
         } else {
             self.value_for_field()
@@ -945,6 +1083,15 @@ impl<'a> Gen<'a> {
 
     fn function(&mut self, id: FunctionId) -> Function {
         let sig = self.sigs[id.index()].clone();
+        if self.compiled {
+            let mut body = Body::new(self, id, &sig);
+            if id.index() == 0 {
+                body.compiled_entry();
+            } else {
+                body.compiled_helper();
+            }
+            return body.finish(sig);
+        }
         let mut body = Body::new(self, id, &sig);
         let steps = 2 + body.g.below(40);
         for _ in 0..steps {
@@ -975,8 +1122,16 @@ struct Body<'g, 'a> {
     /// mostly aimed at, so that a run gets past its first load.
     objs: Vec<(Slot, LayoutId)>,
     /// Slots no instruction but their own may write: an identity set's,
-    /// which `verify` holds to having been written by a set instruction alone.
+    /// which `verify` holds to having been written by a set instruction alone,
+    /// and a compiled program's loop counters and accumulator.
     reserved: Vec<bool>,
+    /// Address slots a compiled program's body formed with `AddrOfSlot`, and
+    /// the layout of the location each names: what its loads and stores go
+    /// through, so that they read and write a place of the layout they name.
+    addrs: Vec<(Slot, LayoutId)>,
+    /// The location the body returns, where it chose one (a compiled entry's
+    /// accumulator); otherwise [`Body::finish`] picks one of the layout.
+    answer: Option<Slot>,
 }
 
 impl<'g, 'a> Body<'g, 'a> {
@@ -990,6 +1145,8 @@ impl<'g, 'a> Body<'g, 'a> {
             jumps: Vec::new(),
             objs: Vec::new(),
             reserved: Vec::new(),
+            addrs: Vec::new(),
+            answer: None,
         };
         for layout in sig.params.iter().chain(&sig.captures) {
             body.fresh(*layout);
@@ -1175,6 +1332,13 @@ impl<'g, 'a> Body<'g, 'a> {
         let at = self.reprs.len() as Slot;
         self.reprs.push(repr);
         self.reserved.push(false);
+        // A compiled program gives a new reference slot a string before the
+        // instruction that asked for it, so that the instruction reads an
+        // object rather than stopping the run at its first null.
+        if self.g.compiled && repr == Repr::Ref {
+            let text = self.g.string();
+            self.push(Inst::Str { dst: at, text });
+        }
         at
     }
 
@@ -1196,7 +1360,7 @@ impl<'g, 'a> Body<'g, 'a> {
         // says which way, the rest how far.
         let raw: u8 = self.g.byte();
         let here = self.code.len() as u32;
-        if raw & 1 == 0 || raw & 0x0e == 0x0e {
+        if self.g.compiled || raw & 1 == 0 || raw & 0x0e == 0x0e {
             here + 1 + u32::from(raw >> 4)
         } else {
             here.saturating_sub(u32::from(raw >> 4))
@@ -1204,13 +1368,35 @@ impl<'g, 'a> Body<'g, 'a> {
     }
 
     fn compare(&mut self) -> (Compare, &'static [Repr]) {
-        match self.g.byte() % 6 {
+        // An identity comparison draws its operands from three `Repr`s, one
+        // of them a host handle's, which a compiled program's frame may not
+        // hold; and an ordered one is refused. So a compiled program compares
+        // by value only.
+        let draw = if self.g.compiled {
+            [0, 1, 2, 4, 5][self.g.below(5)]
+        } else {
+            self.g.byte() % 6
+        };
+        match draw {
             0 => (Compare::Float, &[Repr::Float]),
             1 => (Compare::Bool, &[Repr::Bool]),
             2 => (Compare::Str, &[Repr::Ref]),
             3 => (Compare::Identity, &[Repr::Ref, Repr::Int, Repr::Host]),
             4 => (Compare::Tag, &[Repr::Tag]),
             _ => (Compare::Int, &[Repr::Int, Repr::Duration]),
+        }
+    }
+
+    /// `op`, or `==` where a compiled program would otherwise order two
+    /// tags or two `Bool`s, which the machine refuses at run time
+    /// ("this comparison is not defined for these operands") — a stop on the
+    /// first turn of a loop, which a compiled program is not for.
+    fn defined(&self, on: Compare, op: CmpOp) -> CmpOp {
+        let equality = matches!(op, CmpOp::Eq | CmpOp::Ne);
+        if self.g.compiled && !equality && matches!(on, Compare::Tag | Compare::Bool) {
+            CmpOp::Eq
+        } else {
+            op
         }
     }
 
@@ -1288,6 +1474,14 @@ impl<'g, 'a> Body<'g, 'a> {
     }
 
     fn emit(&mut self, kind: Kind) {
+        if self.g.compiled
+            && matches!(
+                kind,
+                Kind::AddrOfSlot | Kind::AddrOfPart | Kind::Load | Kind::Store
+            )
+        {
+            return self.compiled_address(kind);
+        }
         match kind {
             Kind::Unit => {
                 let dst = self.slot(Repr::Unit);
@@ -1366,6 +1560,7 @@ impl<'g, 'a> Body<'g, 'a> {
             Kind::Cmp => {
                 let (on, reprs) = self.compare();
                 let op = self.cmp_op(!matches!(on, Compare::Float | Compare::Identity));
+                let op = self.defined(on, op);
                 let a = self.slot_of(reprs);
                 let b = self.slot_of(reprs);
                 let dst = if op == CmpOp::Order {
@@ -1465,6 +1660,7 @@ impl<'g, 'a> Body<'g, 'a> {
             Kind::CmpBranch => {
                 let (on, reprs) = self.compare();
                 let op = self.cmp_op(false);
+                let op = self.defined(on, op);
                 let a = self.slot_of(reprs);
                 let b = self.slot_of(reprs);
                 let dst = self.slot(Repr::Bool);
@@ -1512,7 +1708,17 @@ impl<'g, 'a> Body<'g, 'a> {
                 self.push(Inst::Return { src });
             }
             Kind::Call => {
-                let callee = self.callee();
+                let callee = if self.g.compiled {
+                    // A later helper, so that calls form no cycle and a run
+                    // ends; the last helper calls nothing.
+                    let first = self.id.index() + 1;
+                    if first >= self.g.sigs.len() {
+                        return self.emit(Kind::Arith);
+                    }
+                    FunctionId((first + self.g.below(self.g.sigs.len() - first)) as u32)
+                } else {
+                    self.callee()
+                };
                 let sig = self.g.sigs[callee.index()].clone();
                 let args = self.row(&sig.params);
                 let dst = self.loc(sig.returns);
@@ -2072,17 +2278,314 @@ impl<'g, 'a> Body<'g, 'a> {
         });
     }
 
+    // ---- the compiled profile ----------------------------------------------
+
+    /// A random kind a compiled program's function may hold.
+    fn compiled_kind(&mut self) -> Kind {
+        COMPILED_KINDS[self.g.below(COMPILED_KINDS.len())]
+    }
+
+    /// An `Int` slot only this body's own loop and fold instructions write:
+    /// reserved, so that no drawn instruction is given it, and so a counted
+    /// loop always ends.
+    fn private_int(&mut self, value: i64) -> Slot {
+        let at = self.reprs.len() as Slot;
+        self.reprs.push(Repr::Int);
+        self.reserved.push(true);
+        self.push(Inst::Int { dst: at, value });
+        at
+    }
+
+    /// `body` run `turns` times: a counter, the body, and either a backward
+    /// `CmpImmBranch` taken while the counter is below `turns` (the branch is
+    /// taken when its comparison is false), or a forward one out of the loop
+    /// and a backward `Jump`. The one backward edge a compiled program has,
+    /// and it ends.
+    fn counted_loop(&mut self, turns: i32, body: impl FnOnce(&mut Self)) {
+        let i = self.private_int(0);
+        let head = self.code.len() as u32;
+        body(self);
+        self.push(Inst::ArithImm {
+            op: ArithOp::Add,
+            dst: i,
+            a: i,
+            value: 1,
+        });
+        let dst = self.slot(Repr::Bool);
+        if self.g.chance(1, 2) {
+            self.push(Inst::CmpImmBranch {
+                op: CmpOp::Ge,
+                dst,
+                a: i,
+                value: turns,
+                target: head,
+            });
+        } else {
+            // The same loop as a source `while i < turns` lowers: the test
+            // leaves when it is false and a jump closes the loop. Its last
+            // test compares two equal operands, which is where `<` and `<=`
+            // differ.
+            let exit = self.code.len() as u32 + 2;
+            self.push(Inst::CmpImmBranch {
+                op: CmpOp::Lt,
+                dst,
+                a: i,
+                value: turns,
+                target: exit,
+            });
+            self.push(Inst::Jump { to: head });
+        }
+    }
+
+    /// Folds the answer at `src`, of `layout`, into the accumulator `acc`
+    /// with a shift by `one` (a slot holding 1) and an exclusive or — neither
+    /// of which can trap, so the fold never stops a run — where the answer is a number, a `Bool`, or something with a
+    /// length; anything else is left unread.
+    fn fold(&mut self, acc: Slot, one: Slot, src: Slot, layout: LayoutId) {
+        let word = match layout {
+            INT => src,
+            BOOL => {
+                let t = self.slot(Repr::Int);
+                let to = self.code.len() as u32 + 3;
+                self.push(Inst::BranchFalse { cond: src, to });
+                let value = 1 + self.g.below(1 << 20) as i64;
+                self.push(Inst::Int { dst: t, value });
+                self.push(Inst::Bits {
+                    op: BitOp::Xor,
+                    dst: acc,
+                    a: acc,
+                    b: t,
+                });
+                return;
+            }
+            FLOAT => {
+                let t = self.slot(Repr::Int);
+                let ok = self.slot(Repr::Bool);
+                self.push(Inst::FloatTruncate { dst: t, ok, a: src });
+                t
+            }
+            DURATION => {
+                let t = self.slot(Repr::Int);
+                self.push(Inst::Convert {
+                    to: Convert::DurationToInt,
+                    dst: t,
+                    a: src,
+                });
+                t
+            }
+            STR | ARRAY_STR => {
+                let t = self.slot(Repr::Int);
+                self.push(Inst::Len { dst: t, obj: src });
+                t
+            }
+            _ => return,
+        };
+        // Shifted first, so that two equal answers in a row do not cancel;
+        // a left shift discards what passes bit 63 and never traps.
+        self.push(Inst::Shift {
+            op: ShiftOp::Left,
+            dst: acc,
+            a: acc,
+            n: one,
+        });
+        self.push(Inst::Bits {
+            op: BitOp::Xor,
+            dst: acc,
+            a: acc,
+            b: word,
+        });
+    }
+
+    /// A compiled program's entry: its prologue's objects, then a counted
+    /// loop calling the helpers and folding what each answers into the `Int`
+    /// it returns.
+    fn compiled_entry(&mut self) {
+        let acc = self.private_int(0);
+        let one = self.private_int(1);
+        let turns = 1 + self.g.below(48) as i32;
+        let calls = 1 + self.g.below(3);
+        let helpers = self.g.sigs.len() - 1;
+        let picks: Vec<FunctionId> = (0..calls)
+            .map(|_| FunctionId(1 + self.g.below(helpers) as u32))
+            .collect();
+        // Each call's arguments, made before the loop and given a value of
+        // their layout where one can be written down, so that a helper starts
+        // from something other than a null.
+        let rows: Vec<ArgsId> = picks
+            .iter()
+            .map(|callee| {
+                let params = self.g.sigs[callee.index()].params.clone();
+                let row = params
+                    .iter()
+                    .map(|layout| IrArg {
+                        slot: self.argument(*layout),
+                        layout: *layout,
+                    })
+                    .collect();
+                self.g.args_row(row)
+            })
+            .collect();
+        self.counted_loop(turns, |body| {
+            for (callee, args) in picks.into_iter().zip(rows) {
+                let sig = body.g.sigs[callee.index()].clone();
+                let dst = body.loc(sig.returns);
+                body.push(Inst::Call { dst, callee, args });
+                body.fold(acc, one, dst, sig.returns);
+            }
+        });
+        self.answer = Some(acc);
+    }
+
+    /// The address family in a compiled program: an `AddrOfSlot` of a
+    /// location whose layout is known, and loads, stores and `AddrOfPart`s
+    /// through an address formed so, at that layout. A free program's
+    /// address is any `Addr` slot, mostly a null one, and a store through it
+    /// stops the run; in a compiled program that was the most common way a
+    /// helper stopped before it did anything (issue 723).
+    fn compiled_address(&mut self, kind: Kind) {
+        if kind == Kind::AddrOfSlot || self.addrs.is_empty() {
+            let known: Vec<(Slot, LayoutId)> = self
+                .locs
+                .iter()
+                .copied()
+                .filter(|(slot, _)| !self.reserved[*slot as usize])
+                .collect();
+            if known.is_empty() {
+                return;
+            }
+            let (slot, layout) = self.g.pick(&known);
+            let dst = self.fresh(ADDR);
+            self.push(Inst::AddrOfSlot { dst, slot });
+            self.addrs.push((dst, layout));
+            if kind == Kind::AddrOfSlot {
+                return;
+            }
+        }
+        let addrs = self.addrs.clone();
+        let (addr, layout) = self.g.pick(&addrs);
+        match kind {
+            Kind::Load => {
+                let dst = self.loc(layout);
+                self.push(Inst::Load { dst, addr, layout });
+            }
+            Kind::Store => {
+                let src = self.loc(layout);
+                self.push(Inst::Store { addr, src, layout });
+            }
+            _ => {
+                // Part 0 of a one-word location is the location itself.
+                if self.g.width(layout) == 1 {
+                    let dst = self.fresh(ADDR);
+                    self.push(Inst::AddrOfPart { dst, addr, at: 0 });
+                    self.addrs.push((dst, layout));
+                }
+            }
+        }
+    }
+
+    /// A location of `layout` holding a value of it, where the generator can
+    /// write one down: a scalar constant, a string, an object of an
+    /// allocatable layout, the address of a fresh `Int`. Anything else is a
+    /// location of the layout as it is.
+    fn argument(&mut self, layout: LayoutId) -> Slot {
+        let words = self.g.words(layout);
+        match words.as_slice() {
+            [Repr::Int | Repr::Duration] => {
+                let dst = self.fresh(layout);
+                let value = self.g.int();
+                self.push(Inst::Int { dst, value });
+                dst
+            }
+            [Repr::Bool] => {
+                let dst = self.fresh(layout);
+                let value = self.g.chance(1, 2);
+                self.push(Inst::Bool { dst, value });
+                dst
+            }
+            [Repr::Float] => {
+                let dst = self.fresh(layout);
+                let bits = self.g.float_bits();
+                self.push(Inst::Float { dst, bits });
+                dst
+            }
+            [Repr::Addr] => {
+                let target = self.fresh(INT);
+                let dst = self.fresh(layout);
+                self.push(Inst::AddrOfSlot { dst, slot: target });
+                dst
+            }
+            [Repr::Ref] if layout == STR => {
+                let dst = self.fresh(layout);
+                let text = self.g.string();
+                self.push(Inst::Str { dst, text });
+                self.objs.push((dst, STR));
+                dst
+            }
+            [Repr::Ref] if self.g.objects.contains(&layout) => {
+                let dst = self.fresh(layout);
+                let len = Len::Count(u32::from(self.g.byte() % 6));
+                self.push(Inst::Alloc { dst, layout, len });
+                self.objs.push((dst, layout));
+                dst
+            }
+            _ => self.loc(layout),
+        }
+    }
+
+    /// A compiled program's helper: drawn instructions, some of them, now
+    /// and then, inside a counted loop of its own.
+    fn compiled_helper(&mut self) {
+        let steps = 2 + self.g.below(40);
+        let looped = if self.g.chance(1, 2) {
+            Some(self.g.below(steps))
+        } else {
+            None
+        };
+        for step in 0..steps {
+            if self.reprs.len() >= MAX_FRAME {
+                break;
+            }
+            if looped == Some(step) {
+                let turns = 2 + self.g.below(15) as i32;
+                let inner = 1 + self.g.below(8);
+                self.counted_loop(turns, |body| {
+                    for _ in 0..inner {
+                        let kind = body.compiled_kind();
+                        body.emit(kind);
+                    }
+                });
+                continue;
+            }
+            let kind = self.compiled_kind();
+            self.emit(kind);
+        }
+    }
+
     fn finish(mut self, sig: Sig) -> Function {
         // The answer: a location of the function's own return layout, which
         // a fresh frame holds as zeroes if nothing wrote it.
-        let src = self.loc(sig.returns);
+        let src = match self.answer {
+            Some(slot) => slot,
+            None => self.loc(sig.returns),
+        };
         self.push(Inst::Return { src });
         let len = self.code.len() as u32;
+        // A free program's targets wrap round, which is how half of its jumps
+        // go backwards; a compiled program's stop at the `Return`, so that
+        // every jump it draws goes forwards.
+        let compiled = self.g.compiled;
+        let resolve = |to: &mut u32| {
+            if compiled {
+                *to = (*to).min(len - 1);
+            } else {
+                *to %= len;
+            }
+        };
         for at in std::mem::take(&mut self.jumps) {
             match &mut self.code[at] {
-                Inst::Jump { to } | Inst::BranchFalse { to, .. } => *to %= len,
+                Inst::Jump { to } | Inst::BranchFalse { to, .. } => resolve(to),
                 Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
-                    *target %= len
+                    resolve(target)
                 }
                 _ => {}
             }
