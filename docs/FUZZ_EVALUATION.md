@@ -12,6 +12,24 @@ measurement did not establish on its own. A number here is a number for the
 revision, settings and machine it names; none of it is a detection rate for
 bugs nobody has seen.
 
+## 現時点で言えること / 言えないこと
+
+（2026-10-26 時点。根拠は各節、特に section 10。）
+
+**言えること（測定）**
+
+- 用意した 16 個の人工バグ（native codegen 6、GC の root / trace 5、VM の bounds、verifier、run 間の状態、capability、lowering 各 1）のうち、**fuzzing（committed 入力の replay か新しい探索）は 13 個、専用テストは 14 個、合わせて 15 個を検出した**。どれも検出しなかったのは verifier の欠陥（013）だけ。
+- `differential` と `ir` の探索は、1 session 45 s・4 worker で、見つけた欠陥の大半を数秒〜数十秒で見つける（median 1〜19 s）。`ir` は #723 以前は native code を実質実行しておらず、001/002 を 1 件も検出できなかった。
+- 専用テストが見逃して fuzzing だけが見つけた欠陥がある（012、VM の `byteAt` の off-by-one）。逆に fuzzing では原理的に見えない欠陥もある：run 間の状態（014、harness は毎回新しい machine で 1 回だけ走らせる）と capability（015、全 evaluator が同じ host registry を使うので oracle がない）。
+- 探索中に本物のバグを 5 件見つけた（#720、#721、#726、#728、#734）。
+
+**言えないこと**
+
+- **未知のバグの検出率。** 16 個は手で選んだ欠陥で、まだ誰も見ていないバグの標本ではない。スコアはこの 16 個に対する値。
+- `differential_source` の探索の力。45 s では corpus の読み込みも終わらず、seed だけから始めた再実行も途中で止めたので、決着していない。
+- 変更前（`c5be4fc`）の 16 個についての同じ campaign。予算の都合で走らせていない。前後比較は section 6〜9 の個別の測定だけ。
+- 見逃しの診断（到達しない／状態が作られない／観測できない）は一部を除いて推論で、coverage replay による確認はしていない。
+
 ## The setup
 
 All of it on one machine: an x86-64 Mac (i7-10700K, 8 cores, 16 threads),
@@ -669,6 +687,121 @@ generator's documentation said `false`. It is kept for the hostile profile,
 whose committed inputs were found under it, and the complete profile answers
 `false`; the same behaviour made a quarter of `ir`'s programs refuse their
 entry argument (section 6).
+
+## 10. Detection power over sixteen artificial defects (issue 708)
+
+Sixteen mutants (`fuzz/mutants/`): the four of section 4 and twelve more,
+across seven categories. Each is one reviewed patch, applied only in a scratch
+worktree (`scripts/fuzz-mutant.sh`). **The scores below are over these
+sixteen defects. They are not an estimate of how many unknown bugs the
+harness would find**: sixteen hand-written defects are not a sample of the
+bugs nobody has seen.
+
+| mutant | category | what it breaks |
+|---|---|---|
+| 001 | native codegen: compare | `Int` `<` answers `<=` |
+| 002 / 005 | native codegen: arithmetic | `*` / `+` of two slots does not trap on overflow |
+| 006 | native codegen: arithmetic | shift counts 64..127 admitted (masked) |
+| 007 | native codegen: arithmetic | 32-bit division path taken below 2^33 |
+| 008 | native codegen: memory | `LoadElem` admits index = length |
+| 003 / 004 | collector roots | innermost compiled frame not walked / interior addresses not roots |
+| 009 / 010 / 011 | collector tracing | map values / a closure's first capture / array elements after the first not traced |
+| 012 | VM bounds | encoded `byteAt` admits offset = length |
+| 013 | verifier | string id = table length admitted |
+| 014 | run-to-run state | resource table not emptied at a run's edge |
+| 015 | capability grants | ungranted host call reaches the host |
+| 016 | lowering | `!=` of walked values lowered as `==` |
+
+### How
+
+`scripts/fuzz-mutant-campaign.sh --out DIR` at `24fb51f` (origin/main through
+#725 plus #706; x86-64 macOS, i7-10700K, 16 threads, load average 4–7), per
+mutant: **dedicated tests** (`cove-fuzz`'s `gc_roots`, `interior_roots` and
+`regressions` — reported together as `gc_roots` —, `template`,
+`native_tier`, and per category `encoded`+`conformance`, `cove-ir` `verify`,
+`embedding`+`lifecycle`, `authority`+`embedding`, `cove-ir` `lower`+`cove-cli`
+`differential`); **replay** of every target's committed seeds and
+regressions; **exploration** of `differential`, `differential_source` and
+`ir`, **10 sessions × 45 s, `-fork=4`**, libFuzzer seeds 1–10, from the
+starting corpus with every input the replay found removed. A session that
+found nothing is censored at 45 s. Every exploration finding was replayed on
+the clean build. The whole run took 5 h 50 min (13–28 min a mutant).
+`scripts/fuzz-mutant-table.py DIR` makes the tables.
+
+### Measured: per mutant × target
+
+Exploration: sessions that found it of 10, and the time to the first finding
+as Q1 / median / Q3 (`>45s` = censored).
+
+| mutant | dedicated | replay (committed inputs that found it) | `differential` | `ir` | diagnosis of the misses (evidence) |
+|---|---|---|---|---|---|
+| 001 | yes (3 suites) | `differential` 11/11, `differential_source` 16/18, `ir_mutate` 3/6, `image` 1/12 | 10/10, 1 / 1 / 1 s | 10/10, 3 / 8 / 16 s | — |
+| 002 | `template`, `regressions` | none | 2/10, >45 s | 10/10, 2 / 3 / 5 s | `differential`: trigger state rare (overflowing product in compiled code: 0–5 programs a corpus, §9) |
+| 003 | `gc_roots`, `native_tier` | `differential_source` 11/18, `differential` 1/11, `ir_mutate` 1/6 | 10/10, 6 / 16 / 41 s | 10/10, 5 / 10 / 13 s | — |
+| 004 | `interior_roots` | `image` 1/12 (the §8 seed) | 0/10 | 0/10 | state not produced: only the hand-written IR program holds an interior address alone (§8) |
+| 005 | `template`, `regressions` | `differential` 2/11 | 10/10, 3 / 3 / 5 s | 10/10, 2 / 3 / 4 s | — |
+| 006 | `template`, `native_tier` | none | 4/10, 26 s / >45 s / >45 s | 10/10, 8 / 13 / 30 s | — |
+| 007 | 3 suites | `differential_source` 1/18 | 10/10, 4 / 14 / 19 s | 9/10, 1 / 3 / 10 s | — |
+| 008 | `template` | none | 0/10 | 10/10, 3 / 5 / 6 s | `differential`: state not produced from source — the lowering bounds-checks before `LoadElem` (inferred from the lowering) |
+| 009 | `gc_roots` (`gc-root-map`) | `differential_source` 1/18 | 0/10 | 0/10 | not reached: the generator writes no `Map` (generate.rs); `ir` not measured |
+| 010 | `gc_roots` | `differential_source` 1/18 | 5/10, 12 s / >45 s / >45 s | 0/10 | `ir`: no closures in the compiled profile (§6) |
+| 011 | `gc_roots`, `native_tier` | `differential_source` 1/18, `ir_mutate` 1/6 | 10/10, 5 / 19 / 23 s | 0/10 | `ir`: not established |
+| 012 | **none** (`encoded`, `conformance` pass) | none | 9/10, 5 / 8 / 14 s | 10/10, 1 / 2 / 3 s | — |
+| 013 | none (`verify` passes) | none | 0/10 | 0/10 | not reached: `irgen` draws string ids below the table's length; `ir_mutate`, which edits ids, was not explored |
+| 014 | `lifecycle` | none | 0/10 | 0/10 | not reached: every mode runs in a fresh machine, once |
+| 015 | `authority` | none | 0/10 | 0/10 (1 stopped by #734) | not observable: every evaluator shares the host registry, so there is no oracle |
+| 016 | `differential` (cove-cli) | none | 9/10, 3 / 6 / 15 s | 0/10 | `ir`: not reached — the IR target bypasses the lowering |
+
+`differential_source`: **0 of 160 sessions found anything**, and that number
+says little. With the 428-input starting corpus a 45 s session ran 20–25
+inputs — it did not finish loading its corpus. Re-run (`--no-dedicated`)
+from the committed seeds and regressions alone (18 inputs, 550,000–680,000
+executions a session), mutants 001–007 were found by 1 of 70 sessions
+(003). Section 4's 300 s sessions found 001 and 003 in 25–242 s. So for
+`differential_source` 45 s is too short a budget, and for 008–016 the
+re-run was stopped before it reached them: **inconclusive**.
+
+### Measured: mutation scores (of these 16 mutants — not an unknown-bug rate)
+
+| | dedicated tests | committed-input replay | exploration, any of 10 sessions | exploration, share of 160 sessions | any route |
+|---|---|---|---|---|---|
+| `differential` | 14 | 3 | 10 | 79 | 15 |
+| `differential_source` | 14 | 6 | 0 (inconclusive, above) | 0 | 14 |
+| `ir` | 14 | 0 | 8 | 79 | 15 |
+| all targets | 14 | 8 | 11 | | **15 of 16** (fuzzing alone: 13) |
+
+| category | mutants | dedicated tests | fuzzing (replay or exploration) | any route |
+|---|---|---|---|---|
+| native code generation | 6 | 6 | 6 | 6 |
+| collector roots and tracing | 5 | 5 | 5 | 5 |
+| VM bounds | 1 | 0 | 1 | 1 |
+| verifier | 1 | 0 | 0 | **0** |
+| run-to-run state | 1 | 1 | 0 | 1 |
+| capability grants | 1 | 1 | 0 | 1 |
+| lowering | 1 | 1 | 1 | 1 |
+
+**Measured:** fuzzing detects 13 of 16, all of them through
+`differential` or `ir` exploration or a committed input; the dedicated tests
+detect 14; together 15. Fuzzing is the only route for 012 (no dedicated test
+fails); the dedicated tests are the only route for 014 and 015; nothing
+detects 013.
+
+### Also found
+
+The `ir` exploration of mutant 015 stopped on a disagreement the clean build
+shares: the native tier's `dyn.same-type` over a view no `dyn.open` made
+answers where the encoded VM refuses
+([#734](https://github.com/myuon/cove/issues/734);
+`fuzz/regressions/ir/known/dyn-same-type-over-a-forged-view`). It is not
+counted as a detection.
+
+### Before and after sections 6–9
+
+Not measured over the sixteen: the same campaign at `c5be4fc` was stopped
+for budget before it ran. What is measured is per change, in sections 6–9:
+001 and 002 on `ir` (0 of 4,288 inputs before; found in 16–80 s after, §6),
+004 (found by nothing before; by a dedicated test and a seed after, §8), 003
+(unchanged within the seed spread, §7), 002 on `differential` (unchanged, §9).
 
 ## What is not known from these
 
