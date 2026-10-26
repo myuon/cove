@@ -10,7 +10,10 @@
 //!
 //! 1. builds a value that holds references (a string, a vector of strings, a
 //!    struct with a string and an array, a closure whose environment holds a
-//!    string, a string in each of three frames);
+//!    string, a string in each of three frames; and, since issue 725, a map
+//!    of strings, an enum carrying a string, an `Option` and a `Result` of
+//!    one, a closure capturing a closure, a string in each frame of a
+//!    recursion, and a string the innermost frame holds and returns);
 //! 2. holds it in a frame of a function the native tier compiles;
 //! 3. allocates enough garbage in that frame (or in a compiled callee) for the
 //!    small heap to collect several times;

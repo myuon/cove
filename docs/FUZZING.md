@@ -646,7 +646,7 @@ What the numbers say:
 frame was on the stack: the collector *asked* a compiled frame for its roots.
 It does not say the frame held a reference that was still needed, nor that
 anything read that reference afterwards — and a root the collector missed is
-only wrong if both are true. `crates/cove-fuzz/tests/gc_roots.rs` holds six
+only wrong if both are true. `crates/cove-fuzz/tests/gc_roots.rs` holds twelve
 programs to that stronger standard, one shape of root each:
 
 | Seed (`fuzz/seeds/differential_source/`) | What a compiled frame holds across the collections |
@@ -657,6 +657,12 @@ programs to that stronger standard, one shape of root each:
 | `gc-root-struct` | a struct with a `String` and an `Array<Int>` field |
 | `gc-root-closure` | a closure whose environment holds a string |
 | `gc-root-frames` | a string in each of three nested frames; the innermost allocates |
+| `gc-root-map` | a `Map<String, String>` |
+| `gc-root-enum` | an enum whose cases carry a `String` |
+| `gc-root-option` | an `Option<String>` and a `Result<String, Error>` |
+| `gc-root-closure-closure` | a closure that captures a closure that captures a string |
+| `gc-root-recursion` | a string in every frame of a recursion twelve deep; the deepest allocates |
+| `gc-root-callee-holds` | a string the innermost frame builds and holds while it allocates, then returns, and one its caller holds across the call |
 
 Each program builds the value, holds it in a function the native tier
 compiles, allocates about 600 short strings in a loop (on the small heap of
@@ -681,6 +687,19 @@ measures each step, on the native tier over the small heap:
 
 The seeds are also in the `differential_source` corpus, so the fuzzer starts
 from these shapes, and `tests/regressions.rs` replays them in every mode.
+
+The first six are issue 681's, the next six issue 725's. One shape no
+source program can make has a test of its own: an object kept alive by
+nothing but an address into it. The lowering keeps the object in a reference
+slot for as long as an address into it lives, so dropping the interior root
+(ADR 0120's `Space::containers`) leaves the object rooted anyway from source.
+`crates/cove-fuzz/tests/interior_roots.rs` writes the program as IR — take
+`&obj.v`, clear the slot holding `obj`, allocate three thousand objects of
+the same size, load through the address — and requires every mode to answer
+what was stored, `vm-gc` after collecting and `vm` without. Its image is
+`fuzz/seeds/image/interior-root`, so the `image` target starts from it. The
+holder is the entry, on the encoded tier, because the native tier does not
+compile `AddrOfField`: no compiled frame holds an interior address.
 
 What this does not show is that a dropped root would be *noticed*: a
 reference wrongly freed is visible only if its memory is reused and
