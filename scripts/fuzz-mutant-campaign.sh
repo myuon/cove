@@ -13,6 +13,7 @@
 #   --runs N         sessions per (mutant, target), libFuzzer seeds 1..N
 #                    (default 10)
 #   --fork F         -fork=F, the core budget (default 4)
+#   --no-dedicated   skip the dedicated tests (passed to each experiment)
 #
 # With no MUTANT, every one `scripts/fuzz-mutant.sh list` names. Each runs
 # scripts/fuzz-mutant-experiment.sh with the committed seeds and regressions
@@ -22,7 +23,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-out="" corpus="" targets="differential differential_source ir" seconds=45 runs=10 fork=4
+out="" corpus="" targets="differential differential_source ir" seconds=45 runs=10 fork=4 nodedicated=0
 mutants=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
     --seconds) seconds="$2"; shift 2 ;;
     --runs) runs="$2"; shift 2 ;;
     --fork) fork="$2"; shift 2 ;;
+    --no-dedicated) nodedicated=1; shift ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) mutants+=("$1"); shift ;;
   esac
@@ -79,6 +81,7 @@ extra_tests() {
 for m in "${mutants[@]}"; do
   args=(--out "$out/$m" --seconds "$seconds" --runs "$runs" --fork "$fork")
   for t in $targets; do args+=(--explore "$t=$corpus/$t"); done
+  [ "$nodedicated" = 1 ] && args+=(--no-dedicated)
   while IFS= read -r extra; do
     [ -n "$extra" ] && args+=(--dedicated "$extra")
   done < <(extra_tests "$m")

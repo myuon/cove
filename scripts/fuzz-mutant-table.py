@@ -91,20 +91,23 @@ def main():
         m = re.search(r'x (\d+)s', meta)
         budget = int(m.group(1)) if m else 0
 
-    print('| mutant | dedicated tests | target | replay: committed inputs that found it | exploration: sessions that found it | time to find: Q1 / median / Q3 | stopped by another finding |')
-    print('|---|---|---|---|---|---|---|')
+    print('| mutant | dedicated tests | committed inputs of the targets not explored that found it | target | replay: committed inputs that found it | exploration: sessions that found it | time to find: Q1 / median / Q3 | stopped by another finding |')
+    print('|---|---|---|---|---|---|---|---|')
     for n in names:
         r = reports[n]
         ded = [k for k, v in r['dedicated'].items() if v]
         ded = ', '.join(ded) if ded else 'none'
+        others = ', '.join('`%s` %d of %d' % (t, v[0], v[1]) for t, v in sorted(r['replay'].items())
+                           if t not in targets)
         for i, t in enumerate(targets):
             runs = r['explore'].get(t, [])
             found = [x for x in runs if x[1] == 'found']
             times = [x[0] if x[1] == 'found' else None for x in runs]
             stopped = sum(1 for x in runs if x[1] == 'stopped')
             rep = r['replay'].get(t, [0, 0])
-            print('| %s | %s | `%s` | %d of %d | %d of %d | %s / %s / %s | %s |' % (
-                '`%s`' % n if i == 0 else '', ded if i == 0 else '', t, rep[0], rep[1],
+            print('| %s | %s | %s | `%s` | %d of %d | %d of %d | %s / %s / %s | %s |' % (
+                '`%s`' % n if i == 0 else '', ded if i == 0 else '', others if i == 0 else '',
+                t, rep[0], rep[1],
                 len(found), len(runs),
                 quantile(times, 0.25, budget), quantile(times, 0.5, budget), quantile(times, 0.75, budget),
                 stopped or ''))
