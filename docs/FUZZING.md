@@ -226,6 +226,23 @@ undefined behaviour.
   verifies and the rest probes the verifier: 473 of 1,000 fixed inputs
   verified on 2026-10-25, and every one of the 87 instruction kinds the
   generator knows appeared in a program that verified.
+  It has two profiles, chosen by the input's first byte
+  (`irgen::is_compiled`: 2, 3 or 5 modulo 8, three eighths of what a
+  fuzzer makes from nothing; no input committed before the profile existed
+  begins with one, so each still builds the program it built). A **free**
+  program draws every kind, jumps backwards as readily as forwards and does
+  its work in its entry — what the verifier and the deadline are tested on.
+  A **compiled** program ([issue 723](https://github.com/myuon/cove/issues/723))
+  is shaped for the native tier: helpers that draw only the kinds the tier
+  compiles, hold no host, task or scope slot, jump only forwards, call only
+  later helpers and may close a counted loop of their own; loads and stores
+  through addresses of known locations, at those locations' layouts; and an
+  entry that calls the helpers from a counted loop — so the calls cross from
+  the encoded VM into machine code — and folds what each answers into the
+  `Int` it returns. A refused entry argument is drawn only by a wild program
+  now: it used to be one argument in eight, and every argument once the
+  input ran out, which kept a quarter of the programs that verified from
+  starting.
 - `ir_mutate` reads an image body from the front of the input and applies the
   edits in the bytes after it (`crates/cove-fuzz/src/mutate.rs`): an operand,
   a layout, an id or a jump target changed. Its seeds are every program in
