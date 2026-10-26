@@ -123,8 +123,38 @@ pub fn differential_from_bytes(data: &[u8]) -> String {
     let mut u = Unstructured::new(data);
     let mut g = Gen::new(&mut u);
     g.differential = true;
+    g.complete = is_complete(data);
     g.program()
 }
+
+/// Whether `data` builds a run-to-completion program for the differential
+/// harness (issue 706): its first byte is 0, 2, 3 or 6 modulo 8.
+///
+/// Two profiles share this generator. The **hostile** one, the module's
+/// description above, draws boundary values everywhere, so that most runs
+/// stop — on an overflow, a range refused, a capacity that cannot be met —
+/// which is how the trap paths are compared; but in only 33–51% of a
+/// session's programs did every mode run to success
+/// (docs/FUZZ_EVALUATION.md, section 1), and what a program does after its
+/// first stop is compared by nobody. The **complete** one keeps the
+/// operations and draws operands that let the run get to its end: small
+/// integers, divisors that are not zero, shift counts in range, ranges inside
+/// what they slice, capacities, radixes and digit counts a call accepts, no
+/// product compounded round a loop, and recursion and loops of a size that
+/// ends.
+///
+/// The first byte, and not a byte drawn from the input, so that every input
+/// committed before the profile existed — none of which begins with one of
+/// these residues, which `tests/regressions.rs` holds — still builds the
+/// program it built. Four residues of eight make half of what a fuzzer makes
+/// from nothing complete.
+pub fn is_complete(data: &[u8]) -> bool {
+    matches!(data.first().map(|b| b % 8), Some(0 | 2 | 3 | 6))
+}
+
+/// Integers a complete program draws where the hostile one draws [`EDGES`]:
+/// small, of both signs, with the powers of two near a byte.
+const SMALL: [i64; 16] = [0, 1, 2, 3, 7, 8, 15, 16, 31, 63, 64, 100, 127, 255, -1, -2];
 
 /// A whole program — helpers, then `export fn main() -> Result<Unit, Error>` —
 /// generated from the choices `u` supplies. An exhausted `u` answers its
@@ -368,6 +398,8 @@ struct Gen<'a, 'b> {
     /// Generating for the differential harness: the clock is granted, and no
     /// choice may make the answer depend on which correct evaluator ran it.
     differential: bool,
+    /// The run-to-completion profile: see [`is_complete`].
+    complete: bool,
 }
 
 /// The most statements a program is given, across every function.
@@ -419,6 +451,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             closures: 0,
             ctx: Ctx::Main,
             differential: false,
+            complete: false,
         }
     }
 
@@ -432,8 +465,18 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.u.int_in_range(0..=n - 1).unwrap_or(0)
     }
 
-    /// True with probability about `num / den`, false once exhausted.
+    /// True with probability about `num / den`.
+    ///
+    /// Once the input is used up, `Unstructured::ratio` answers `true` — it
+    /// draws the low end of its range, which is within `num` — so a hostile
+    /// program whose input ran out draws every hazard from there on. That is
+    /// kept, because the inputs committed for it were found under it; a
+    /// complete program answers `false` instead, which is what this comment
+    /// used to say of both.
     fn chance(&mut self, num: u8, den: u8) -> bool {
+        if self.complete && self.u.is_empty() {
+            return false;
+        }
         self.u.ratio(num, den).unwrap_or(false)
     }
 
@@ -781,7 +824,14 @@ impl<'a, 'b> Gen<'a, 'b> {
         };
         let value = self.expr(ty, 0);
         if ty == Ty::Int && self.chance(1, 3) {
-            let op = ["+=", "-=", "*="][self.pick(3)];
+            // A product compounded round a loop is an overflow waiting for
+            // the loop's length, which a complete program does not draw.
+            let ops: &[&str] = if self.complete {
+                &["+=", "-="]
+            } else {
+                &["+=", "-=", "*="]
+            };
+            let op = ops[self.pick(ops.len())];
             return format!("{pad}{} {op} {value}\n", target.name);
         }
         format!("{pad}{} = {value}\n", target.name)
@@ -791,6 +841,17 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// answers one: what `?` propagates is that function's answer, so a `?`
     /// in `main` can end the run with `Err`.
     fn try_statement(&mut self, pad: &str) -> String {
+        // In a complete program `main` reads an `Err` rather than answering
+        // it, so that the run goes on; a helper still propagates one, and
+        // `main` sees it as a value.
+        if self.complete && self.ctx == Ctx::Main {
+            let operand = self.res(1);
+            let or = self.int_leaf();
+            let x = self.fresh("x");
+            let text = format!("{pad}let {x}: Int = ({operand}).unwrapOr({or})\n");
+            self.bind(&x, Ty::Int, false);
+            return text;
+        }
         let operand = match self.ctx {
             Ctx::Main | Ctx::Helper(Kind::Res) => self.res(1),
             Ctx::Helper(Kind::Opt) => self.opt(1),
@@ -836,7 +897,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         let pad = "  ".repeat(indent);
         let v = self.fresh("c");
         let e = self.fresh("e");
-        let bound = if self.chance(1, 4) {
+        let bound = if !self.complete && self.chance(1, 4) {
             format!("({}).bitAnd(255)", self.int(2))
         } else {
             (8 * self.pick(17)).to_string()
@@ -860,7 +921,7 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// reading of the time.
     fn clock_statement(&mut self, pad: &str) -> String {
         if self.chance(1, 2) {
-            let n = if self.chance(1, 4) {
+            let n = if !self.complete && self.chance(1, 4) {
                 self.int(2)
             } else {
                 self.pick(20).to_string()
@@ -992,6 +1053,12 @@ impl<'a, 'b> Gen<'a, 'b> {
     // ---- boundary values -------------------------------------------------
 
     fn edge(&mut self) -> String {
+        if self.complete {
+            return match self.pick(4) {
+                0 => self.pick(256).to_string(),
+                _ => literal(SMALL[self.pick(SMALL.len())]),
+            };
+        }
         match self.pick(4) {
             0 => {
                 let v: i64 = self.u.arbitrary().unwrap_or(0);
@@ -1013,7 +1080,7 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// A small count most of the time, an edge some of the time.
     fn loop_bound(&mut self) -> String {
-        if self.chance(1, 8) {
+        if !self.complete && self.chance(1, 8) {
             let e = self.int(2);
             format!("({e}).bitAnd(63)")
         } else {
@@ -1022,6 +1089,9 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     fn capacity(&mut self) -> String {
+        if self.complete {
+            return self.pick(65).to_string();
+        }
         match self.pick(6) {
             0 => "0".to_string(),
             1 => "-1".to_string(),
@@ -1031,6 +1101,11 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     fn byte(&mut self) -> String {
+        // ASCII, so that a builder's bytes stay UTF-8 and its `finish` does
+        // not refuse them.
+        if self.complete {
+            return self.pick(128).to_string();
+        }
         match self.pick(8) {
             0 => self.edge(),
             1 => ["256", "-1", "128", "191", "192", "237", "244", "245"][self.pick(8)].to_string(),
@@ -1061,6 +1136,9 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// chained without the depth growing until the parser refused it
     /// (`fuzz/regressions/differential/generator-byte-range-nests-too-deep`).
     fn byte_range(&mut self, s: &str, depth: usize) -> (String, String) {
+        if self.complete {
+            return ("0".to_string(), format!("{s}.byteLength()"));
+        }
         match self.pick(6) {
             0 | 1 => ("0".to_string(), format!("{s}.byteLength()")),
             2 => (format!("{s}.byteLength()"), "0".to_string()),
@@ -1075,6 +1153,9 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// A digit count for `Float.format`: in `0..=17` almost always.
     fn digits(&mut self) -> String {
+        if self.complete {
+            return self.pick(18).to_string();
+        }
         match self.pick(20) {
             0 => ["-1", "18", "100"][self.pick(3)].to_string(),
             _ => self.pick(18).to_string(),
@@ -1085,7 +1166,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         match self.pick(4) {
             0 => ("Vector.of()".to_string(), true),
             1 => {
-                let n = if self.chance(1, 6) {
+                let n = if !self.complete && self.chance(1, 6) {
                     self.edge()
                 } else {
                     self.pick(10).to_string()
@@ -1143,6 +1224,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let op = ["+", "-", "*", "/", "%"][self.pick(5)];
                 let a = self.int(d);
                 let b = self.int(d);
+                let b = self.divisor(op, b);
                 format!("({a} {op} {b})")
             }
             6 => {
@@ -1153,12 +1235,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let m = ["bitAnd", "bitOr", "bitXor", "floorDiv", "floorMod"][self.pick(5)];
                 let a = self.int(d);
                 let b = self.int(d);
+                let b = self.divisor(m, b);
                 format!("({a}).{m}({b})")
             }
             8 => {
                 let m = ["shiftLeft", "shiftRight", "shiftRightLogical"][self.pick(3)];
                 let a = self.int(d);
-                let count = if self.chance(1, 4) {
+                let count = if !self.complete && self.chance(1, 4) {
                     self.int(d)
                 } else {
                     format!("({}).bitAnd(63)", self.int(d))
@@ -1313,7 +1396,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 // Past the end some of the time; mostly a byte that is there,
                 // so that one `byteAt` does not end most programs.
                 let s = self.string_atom();
-                if self.chance(1, 3) {
+                if !self.complete && self.chance(1, 3) {
                     let i = self.index(&s, Ty::Str);
                     format!("{s}.byteAt({i})")
                 } else {
@@ -1339,6 +1422,16 @@ impl<'a, 'b> Gen<'a, 'b> {
                 None => self.int_leaf(),
             },
             _ => self.int_leaf(),
+        }
+    }
+
+    /// `b` as the right operand of `op`: unchanged, but in a complete program
+    /// made odd — so never zero — where `op` divides.
+    fn divisor(&self, op: &str, b: String) -> String {
+        if self.complete && matches!(op, "/" | "%" | "floorDiv" | "floorMod") {
+            format!("({b}).bitOr(1)")
+        } else {
+            b
         }
     }
 
@@ -1373,6 +1466,9 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     fn radix(&mut self) -> String {
+        if self.complete {
+            return ["2", "8", "10", "16", "36"][self.pick(5)].to_string();
+        }
         match self.pick(12) {
             0 => self.edge(),
             1 => ["0", "1", "37", "-1"][self.pick(4)].to_string(),
@@ -1386,7 +1482,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             return self.int_leaf();
         };
         let second = self.int(d);
-        let first = if helper.kind == Kind::Recursive && !self.chance(1, 8) {
+        let first = if helper.kind == Kind::Recursive && self.complete {
+            format!("({}).bitAnd(15)", self.int(d))
+        } else if helper.kind == Kind::Recursive && !self.chance(1, 8) {
             // A depth the program computes, kept below the call-depth limit
             // most of the time and not always.
             format!("({}).bitAnd(63)", self.int(d))
@@ -1539,6 +1637,18 @@ impl<'a, 'b> Gen<'a, 'b> {
         format!("\"{text}\"")
     }
 
+    /// What `replace` looks for and `split` splits on: anything in a hostile
+    /// program, where the empty string is refused; a literal piece, which is
+    /// never empty, in a complete one.
+    fn needle(&mut self) -> String {
+        if self.complete {
+            let piece = PIECES[self.pick(PIECES.len())];
+            format!("\"{piece}\"")
+        } else {
+            self.string_atom()
+        }
+    }
+
     /// A string literal or a string local: something `codePointAtByte` and
     /// `appendSlice` can be asked about twice without evaluating it twice.
     fn string_atom(&mut self) -> String {
@@ -1555,6 +1665,10 @@ impl<'a, 'b> Gen<'a, 'b> {
         let d = depth + 1;
         match self.pick(22) {
             0..=3 => self.string_atom(),
+            4 if self.complete => {
+                let s = self.string_atom();
+                format!("{s}.slice(0, {s}.length())")
+            }
             4 => {
                 let s = self.string(d);
                 let a = self.int(d);
@@ -1595,7 +1709,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             9 => {
                 let s = self.string(d);
-                let a = self.string_atom();
+                let a = self.needle();
                 let b = self.string_atom();
                 format!("({s}).replace({a}, {b})")
             }
@@ -1628,6 +1742,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let i = self.int(d);
                 let m = ["toHex", "toDecimal"][self.pick(2)];
                 let w = match self.pick(16) {
+                    _ if self.complete => self.pick(24).to_string(),
                     0 => self.edge(),
                     1 => "-1".to_string(),
                     _ => self.pick(24).to_string(),
@@ -1690,7 +1805,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             1 => {
                 let s = self.string(d.max(MAX_DEPTH - 1));
-                let sep = self.string_atom();
+                let sep = self.needle();
                 format!("({s}).split({sep})")
             }
             2 => {
@@ -1730,6 +1845,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                 } else {
                     format!("[{items}]")
                 }
+            }
+            4 if self.complete => {
+                let a = self.array_atom();
+                format!("{a}.slice(0, {a}.length())")
             }
             4 => {
                 let a = self.array(d);

@@ -595,6 +595,81 @@ comparison of `vm` with `vm-gc` sees it at once. That the fuzzer *makes* the
 state on its own is still not shown: the `ir` explorations of section 6 did
 not, and the native tier cannot compile a function that holds one.
 
+## 9. A run-to-completion profile (issue 706)
+
+Section 5's second item: the `differential` generator has a **complete**
+profile beside the **hostile** one, chosen by the input's first byte
+([FUZZING.md, "What the generator aims at"](FUZZING.md#what-the-generator-aims-at)).
+`ir`'s compiled profile (section 6) is the IR target's counterpart.
+
+### Measured: over fixed inputs
+
+`cove-fuzz stats differential` over 300 random inputs each, the first byte
+forced to one profile (at the change, over ADR 0124's small heap):
+
+| | complete | hostile |
+|---|---|---|
+| compared in full | 296 | 285 |
+| every mode ran to success | **296** | **129** |
+| prefix-only | 4 | 15 |
+| a collection under a compiled frame | 102 | 56 |
+| mismatches | 0 | 0 |
+
+Before the profile was tuned, the first complete programs still stopped in
+120 of 300: 81 on an `Err` that `main` propagated, 14 on `replace` and 13 on
+`split` given an empty string, and 3 on a builder's bytes that were not
+UTF-8. Each is now drawn otherwise in the complete profile only.
+
+### Measured: in a session, and what a session needs to see it
+
+`scripts/fuzz-measure.sh differential 180 --runs 3 --fork 4 --replay`, seeds
+1–3, before (`c5be4fc`) and after (`71e6f7b`, the change on the same base).
+
+From the 8-input starting corpus of sections 1–4, the profile did nothing a
+session could see: of the after sessions' grown corpora (1,578, 1,578 and
+1,283 inputs) 1, 1 and 2 were complete programs, because libFuzzer mutates
+an input's later bytes far more often than its first, and every starting
+input is hostile. Full comparisons with every mode a success were 38.8 /
+52.2 / 28.5% of what ran before and 40.9 / 47.3 / 21.5% after.
+
+From the same 8 inputs **and the three committed complete seeds** (11
+inputs, for both builds):
+
+| | before | after |
+|---|---|---|
+| executions counted | 6,815 / 7,000 / 6,349 | 6,917 / 6,696 / 7,745 |
+| full, every mode success | 2,418 / 1,508 / 2,250 | 2,266 / 4,476 / 3,441 |
+| as a share of what ran | 35.5 / 21.5 / 35.4% | **32.8 / 66.8 / 44.4%** |
+| prefix-only, of which empty | 1,249, 1,039 / 562, 491 / 553, 451 | 1,203, 891 / 673, 531 / 588, 465 |
+| complete programs in the grown corpus | — | 39 / 749 / 52 of 1,375 / 1,303 / 1,520 |
+| mismatches | 0 | 0 |
+
+**Measured:** the share of runs that end in success in every mode rises
+where the complete seeds took hold in the corpus (seed 2: 749 of 1,303
+inputs, 66.8%) and hardly moves where they did not (seed 1: 39 inputs).
+
+### Measured: mutant 002, the trigger the profile does not make
+
+Section 5 hoped a complete profile would also raise mutant 002's trigger — an
+overflowing product in compiled code — by putting the deliberate overflow
+after the state. This change does not do that: the complete profile draws
+*no* overflow on purpose, and the hostile one is unchanged. The coverage
+replay agrees (`Arith.Int.Mul` or `ArithImm.Mul` overflowing in compiled
+code: 0, 0, 3 programs before, 0, 5, 2 after), and so does the mutant:
+explored 3 × 300 s from the 11-input corpus, 002 was found at 247 s, not in
+300 s, and at 113 s before, and at 34 s, not in 300 s, and at 147 s after —
+the same within the spread of three seeds. Placing a hazard after the state
+it is meant to break is left to a later change of the hostile profile.
+
+### Also found
+
+`Unstructured::ratio` answers `true` once the input is used up, so a
+hostile program whose input ran out draws every hazard from there on — the
+generator's documentation said `false`. It is kept for the hostile profile,
+whose committed inputs were found under it, and the complete profile answers
+`false`; the same behaviour made a quarter of `ir`'s programs refuse their
+entry argument (section 6).
+
 ## What is not known from these
 
 - How the four mutants' detection would move with a longer budget or more

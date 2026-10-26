@@ -330,6 +330,61 @@ fn the_small_heap_modes_start_whenever_vm_does() {
     }
 }
 
+/// The differential inputs committed before the run-to-completion profile
+/// existed still build the programs they built: none of them begins with a
+/// byte that selects it (`generate::is_complete`).
+#[test]
+fn the_differential_inputs_from_before_the_complete_profile_are_still_hostile() {
+    for name in [
+        "seeds/differential/random-64",
+        "seeds/differential/random-192",
+        "seeds/differential/random-512",
+        "seeds/differential/random-1024",
+        "seeds/differential/random-2048",
+        "seeds/differential/random-4096",
+        "regressions/differential/generator-byte-range-nests-too-deep",
+        "regressions/differential/generator-vector-chain-nests-too-deep",
+    ] {
+        let bytes = std::fs::read(fuzz_dir().join(name)).expect("a committed input");
+        assert!(!cove_fuzz::generate::is_complete(&bytes), "{name}");
+    }
+}
+
+/// The run-to-completion profile's promise (issue 706), over fixed inputs:
+/// every mode agrees, and on the interpreter — which has no heap capacity
+/// and is the oracle — at least three programs in four run to success. The
+/// hostile profile is held to one in four by
+/// [`generated_programs_reach_the_end`].
+#[test]
+fn complete_programs_run_to_the_end() {
+    use cove_fuzz::differential::Mode;
+
+    let seeds = 0..32u64;
+    let mut finished = 0;
+    for seed in seeds.clone() {
+        let mut data = choices(seed, 256 + 64 * seed as usize);
+        data[0] &= !7;
+        assert!(cove_fuzz::generate::is_complete(&data));
+        let program = cove_fuzz::generate::differential_from_bytes(&data);
+        let report = cove_fuzz::differential::compare(&program)
+            .unwrap_or_else(|why| panic!("seed {seed} was refused:\n{why}\n{program}"));
+        assert!(
+            report.mismatch.is_none(),
+            "seed {seed}:\n{program}\n{}",
+            report.describe()
+        );
+        let ast = report.observed.iter().find(|o| o.mode == Mode::Ast);
+        if ast.is_some_and(|o| o.outcome == cove_runtime::trace::RunOutcome::Success) {
+            finished += 1;
+        }
+    }
+    let total = seeds.count();
+    assert!(
+        finished * 4 >= total * 3,
+        "only {finished} of {total} complete programs ran to success on the interpreter"
+    );
+}
+
 /// `cove-fuzz stats` over the committed differential inputs (issue 704):
 /// every input is counted, none is a finding, and the counts are not empty —
 /// the generated seeds all reach a run, and some of them compare in full.
