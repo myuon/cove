@@ -98,9 +98,12 @@ run end: small integers, odd divisors, shift counts masked to 0..=63, whole
 ranges, capacities, radixes, widths and digit counts a call accepts, ASCII
 bytes, non-empty `split` and `replace` needles, no `*=` round a loop, a
 recursion depth masked to 0..=15, and an `Err` in `main` read with
-`unwrapOr` rather than propagated. Over 300 fixed inputs each, every mode ran
-to success in 270 complete programs (the other 30 ran out of memory on the
-small heap only) and in 120 hostile ones. `ir`'s compiled profile (below) is
+`unwrapOr` rather than propagated. Over 300 fixed inputs each (with ADR
+0124's small heap), every mode ran to success in 296 complete programs (the
+other 4 ran out of memory on the small heap only, or met the interpreter's
+deadline) and in 129 hostile ones. A fuzzer seldom changes an input's first
+byte, so the complete profile reaches a session through its seeds,
+`fuzz/seeds/differential/complete-*`. `ir`'s compiled profile (below) is
 the IR target's equivalent: forward jumps, counted loops, initialised
 values.
 
