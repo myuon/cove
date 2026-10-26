@@ -211,11 +211,11 @@ fn compiled_ir_programs_reach_compiled_code() {
             None => native_skipped = true,
         }
     }
-    assert!(
-        verified * 2 >= total,
-        "{verified} of {total} verified"
+    assert!(verified * 2 >= total, "{verified} of {total} verified");
+    assert_eq!(
+        started, verified,
+        "a verified compiled program did not start"
     );
-    assert_eq!(started, verified, "a verified compiled program did not start");
     if !native_skipped {
         assert!(
             native * 2 >= verified,
