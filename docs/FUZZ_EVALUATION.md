@@ -392,6 +392,83 @@ missing, not by what is imaginable.
    inputs the front end refuses, so speeding up the standard library's check
    would raise its rate, but what it runs is what limits it.
 
+## 7. The small heap is sized from the program's literals (issue 724)
+
+Section 5's third item, done:
+[ADR 0124](adr/0124-the-small-heap-is-sized-from-the-program-s-literals.md)
+gives `vm-gc` and `native-gc` the words the program's literals took on `vm`
+and 2^9 words above them, where ADR 0113 gave them 2^11 words in all. The
+ADR has the replay that chose 2^9.
+
+### Measured: the same budget, before and after
+
+`scripts/fuzz-measure.sh <target> 180 --runs 3 --fork 4 --replay`, seeds 1–3,
+the same starting corpora (`scripts/fuzz-seed-corpus.sh` at `c5be4fc`: 8
+`differential` inputs, 419 `differential_source`), on the setup's machine.
+**Before** is `c5be4fc`, **after** `e29452e`. In-session counts, the three
+seeds:
+
+| `differential` | before | after |
+|---|---|---|
+| executions counted | 7,413 / 9,086 / 7,393 | 8,494 / 7,874 / 6,771 |
+| small-heap runs that did not start where `vm` did | **258 / 197 / 539** | **0 / 0 / 0** |
+| `vm-gc` collected (programs) | 1,436 / 953 / 2,048 | 1,462 / 1,801 / 1,953 |
+| a collection under a compiled frame (programs) | 1,318 / 759 / 1,831 | 1,298 / 1,605 / 1,852 |
+| `vm-gc` ran out of memory | 587 / 490 / 1,559 | 410 / 374 / 486 |
+| `vm-gc` vs `native-gc`, compared in full | 7,412 / 9,059 / 7,390 | 8,482 / 7,865 / 6,771 |
+| of those, both success | 2,879 / 4,741 / 2,109 | 3,920 / 3,599 / 1,806 |
+| prefix-only programs, of which the common prefix was empty | 593, 517 / 519, 439 / 1,571, 1,213 | 430, 310 / 395, 274 / 494, 373 |
+| mismatches | 0 | 0 |
+
+| `differential_source` | before | after |
+|---|---|---|
+| executions counted | 144,889 / 106,460 / 77,705 | 194,886 / 73,960 / 149,377 |
+| ran | 2,419 / 2,305 / 1,998 | 2,799 / 1,861 / 2,722 |
+| small-heap runs that did not start where `vm` did | 1 / 72 / 172 | 0 / 0 / 0 |
+| `vm-gc` collected (programs) | 787 / 800 / 804 | 998 / 586 / 843 |
+| a collection under a compiled frame (programs) | 629 / 810 / 934 | 772 / 599 / 810 |
+| `vm-gc` ran out of memory | 255 / 435 / 399 | 421 / 145 / 365 |
+| `vm-gc` vs `native-gc` both success, in full | 746 / 816 / 800 | 932 / 529 / 972 |
+| mismatches | 0 | 0 |
+
+And replaying each session's grown `differential` corpus once an input (the
+before corpora with the before build, the after with the after):
+
+| `differential`, corpus | before | after |
+|---|---|---|
+| inputs | 1,576 / 1,697 / 1,299 | 1,613 / 1,520 / 1,266 |
+| small-heap runs that did not start | 80 / 66 / 118 | 0 / 0 / 0 |
+| `vm-gc` collected | 367 / 261 / 383 | 373 / 398 / 374 |
+| a collection under a compiled frame | 336 / 208 / 347 | 328 / 340 / 349 |
+| `vm-gc` ran out of memory | 169 / 137 / 308 | 85 / 83 / 88 |
+| prefix-only, of which empty | 169, 149 / 142, 120 / 309, 250 | 89, 64 / 89, 57 / 88, 63 |
+
+**Measured:** no small-heap run fails before its first instruction now on
+either source target, and the programs that collect, and that collect under
+a compiled frame, are as many or more; the out-of-memory stops and the
+programs compared only by an empty prefix fell by a third to two thirds on
+`differential`. The `differential_source` sessions vary more between seeds
+than between the two builds.
+
+### Measured: mutant 003, before and after
+
+`scripts/fuzz-mutant-experiment.sh 003-gc-innermost-frame-under-compiled-code`
+on each build, replaying the committed seeds and regressions, exploring
+3 × 300 s (`-fork=4`) from the starting corpora above with every input that
+found the mutant removed:
+
+| | before (`c5be4fc`) | after (`e29452e`) |
+|---|---|---|
+| dedicated tests | `gc_roots`, `native_tier` | the same |
+| inputs of the `differential_source` starting corpus that found it | 26 of 419 | 34 of 419 |
+| new exploration, `differential` | 14 s, 25 s, 12 s | 20 s, 13 s, 19 s |
+| new exploration, `differential_source` | 75 s, 55 s, 119 s | 136 s, 111 s, 48 s |
+
+**Inferred:** the change does not move the time to find 003 by more than
+the spread between seeds; it does make eight more of the repository's
+programs find it on replay, which is consistent with more of them collecting
+under a compiled frame once nothing runs out of memory before starting.
+
 ## What is not known from these
 
 - How the four mutants' detection would move with a longer budget or more
