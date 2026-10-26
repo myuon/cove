@@ -1,0 +1,30 @@
+use console.println
+
+// The callee holds the last reference: `build` makes a string, keeps it in
+// its own frame while it allocates enough to collect, and only then hands it
+// back. Its caller holds a string of its own across the call as well, so
+// both a frame below the innermost one and the innermost one hold something
+// a collection must keep.
+fn build(seed: Int) -> String {
+  let made = "made:{seed}:{seed * 31}:{seed * 977}"
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{made} {junk}"
+}
+
+fn holdAndCall(seed: Int) -> String {
+  let mine = "mine:{seed}:{seed * 7}"
+  let theirs = build(seed)
+  "{mine} [{theirs}]"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdAndCall(7))?
+  println(holdAndCall(11))?
+  Ok(())
+}

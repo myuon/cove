@@ -565,6 +565,17 @@ impl Body<'_> {
         } else {
             a
         };
+        // An erased operand whose answer is erased too: `-` of an `Any`,
+        // which may be an `Int`, a `Float` or a `Duration` and nothing
+        // written says which. Applying the instruction to the box would be
+        // arithmetic on an address, which the verifier refuses (issue 721);
+        // choosing a type would be inventing one. (`!` of an `Any` answers
+        // `Bool` in the checker, so it is opened above and does not come
+        // here.)
+        if self.is_boxed(a.layout) {
+            self.release(a, expr.span);
+            return self.gap("an operator applied to a value whose type is erased", expr);
+        }
         let repr = self.frame.repr(dst.slot);
         let inst = match op {
             UnaryOp::Not => Inst::Not {
@@ -700,6 +711,16 @@ impl Body<'_> {
             self.release(b, expr.span);
             self.release(a, expr.span);
             return self.gap("an ordering comparison of two heap values", expr);
+        }
+        // Arithmetic on two erased operands: nothing states whether `+` is
+        // over `Int`s, `Float`s or `Duration`s, and the instruction applied
+        // to the two boxes would be arithmetic on addresses, which the
+        // verifier refuses (issue 721). The comparisons have their own
+        // answers above.
+        if arith_of(op).is_some() && self.is_boxed(a.layout) && self.is_boxed(b.layout) {
+            self.release(b, expr.span);
+            self.release(a, expr.span);
+            return self.gap("arithmetic on two values whose types are erased", expr);
         }
         let operand = self.frame.repr(a.slot);
         // A host resource handle is the one word that is neither a scalar the

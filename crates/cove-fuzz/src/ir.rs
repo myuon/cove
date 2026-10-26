@@ -47,7 +47,7 @@ use cove_diag::SourceMap;
 use cove_ir::{LayoutId, Program, Shape};
 use cove_runtime::{OwnedVm, PreparedProgram, Runtime, Value};
 
-use crate::differential::{self, Mode, Observed, Report, GC_HEAP_WORDS};
+use crate::differential::{self, gc_heap_words, Mode, Observed, Report};
 use crate::{on_stack, HEAP_WORDS};
 
 /// The wall-clock time one run of a program here may take.
@@ -226,13 +226,9 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
         HEAP_WORDS,
         &subject,
     ));
-    observed.push(machine_run(
-        Mode::VmGc,
-        &sources,
-        encoded,
-        GC_HEAP_WORDS,
-        &subject,
-    ));
+    // The small heap above what the program's literals took on `vm`.
+    let small = gc_heap_words(observed[0].literal_words.unwrap_or(0));
+    observed.push(machine_run(Mode::VmGc, &sources, encoded, small, &subject));
     match &native {
         Ok(native) => {
             observed.push(machine_run(
@@ -246,7 +242,7 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
                 Mode::NativeGc,
                 &sources,
                 native.clone(),
-                GC_HEAP_WORDS,
+                small,
                 &subject,
             ));
         }
@@ -318,8 +314,10 @@ fn machine_run(
     let native_calls = vm.tiers().native();
     let under_compiled = vm.collections_while_compiled();
     let instructions = vm.instructions();
+    let literal_words = vm.literal_words();
     drop(vm);
     let mut observed = differential::observe(mode, answer, &out, &err);
+    observed.literal_words = Some(literal_words);
     observed.collections = Some(collections);
     observed.native_calls = Some(native_calls);
     observed.collections_while_compiled = Some(under_compiled);

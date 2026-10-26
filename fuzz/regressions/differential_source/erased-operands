@@ -1,0 +1,8 @@
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let a = -timeout(1s) { 1 }?
+  let b = timeout(1s) { 1 }?
+  let c = b + b
+  Ok(())
+}

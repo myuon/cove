@@ -392,12 +392,217 @@ missing, not by what is imaginable.
    inputs the front end refuses, so speeding up the standard library's check
    would raise its rate, but what it runs is what limits it.
 
+## 6. `ir` reaches compiled code (issue 723)
+
+Section 5's first item, done: the `ir` generator has a *compiled* profile
+beside the free one ([FUZZING.md, "The VM-level targets"](FUZZING.md#the-vm-level-targets)),
+and a refused entry argument is drawn only by a wild program.
+
+**Why a quarter of `ir`'s programs never started** (measured over `ir-stats`'
+first 1,000 fixed inputs at `c5be4fc`): 119 of the 473 that verified did not
+start, every one of them refused at the boundary with `this value is not the
+…`, and every one of those had a `Unit` argument. The generator drew one
+argument in eight as `Unit` on purpose — and `Unstructured::ratio` answers
+`true` once the input is used up, so a program whose input ran out drew
+`Unit` for every argument.
+
+### Measured: the same budget, before and after
+
+`scripts/fuzz-measure.sh ir 180 --runs 3 --fork 4 --replay`, seeds 1–3, from
+the same 6-input starting corpus (`scripts/fuzz-seed-corpus.sh ir` at
+`c5be4fc`, without the compiled seeds this change adds), on the setup's
+machine with a load average of 5–7. **Before** is `c5be4fc`, **after**
+`70598e3` (this change). Per session, the three seeds:
+
+| | before | after |
+|---|---|---|
+| executions counted | 80,770 / 113,905 / 96,093 | 77,186 / 181,073 / 119,395 |
+| verified | 55,460 / 82,016 / 72,867 | 56,134 / 143,513 / 97,663 |
+| started on `vm` (of verified) | 76% / 68% / 75% | 100% / 99.97% / 99.99% |
+| full, every mode success | 3,758 / 6,302 / 3,695 | 7,357 / 35,837 / 21,919 |
+| **of those, native ran** | **7 / 8 / 0** | **2,138 / 27,077 / 16,175** |
+| native ran (programs) | 100 / 452 / 88 (0.1–0.6% of ran) | 4,142 / 69,777 / 34,632 (7.4–48.6%) |
+| a collection under a compiled frame (programs) | 27 / 323 / 6 | 153 / 1,198 / 768 |
+| mismatches | 0 | 0 |
+
+And what the grown corpora *executed* in a function the tier compiles
+(`cove-fuzz coverage ir`, once an input; programs, the three seeds):
+
+| key | before: executed in compiled code | after |
+|---|---|---|
+| programs measured | 2,877 / 3,676 / 3,170 | 3,331 / 4,426 / 4,108 |
+| `Call` | 0 / 0 / 0 | 29 / 319 / 190 |
+| `Alloc` | 6 / 5 / 5 | 246 / 1,300 / 914 |
+| `Arith.Int.Mul` | 0 / 0 / 0 | 21 / 69 / 73 |
+| `Store` | 0 / 0 / 0 | 58 / 100 / 238 |
+| state `CmpImmBranch.Lt:equal` (a counted loop's last test) | 0 / 0 / 0 | 43 / 145 / 104 |
+| state `Cmp.Int.Lt:equal` | 0 / 0 / 0 | 3 / 6 / 6 |
+| state `Arith.Int.Mul` or `ArithImm.Mul` overflowing | 0 / 0 / 0 | 3 / 10 / 21 |
+
+### Measured: mutants 001, 002 and 004 on `ir`
+
+`scripts/fuzz-mutant-experiment.sh` at `70598e3`, replaying the seeds, the
+regressions and the three *after* corpora, and exploring 3 × 180 s
+(`-fork=4`) from the 6-input starting corpus:
+
+| mutant | dedicated tests | corpus replay (after corpora) | new exploration, 3 × 180 s | before (section 4) |
+|---|---|---|---|---|
+| `001-native-int-lt-is-le` | detected (`gc_roots`, `template`, `native_tier`, as before) | 1 of 3,999, 8 of 5,141, 2 of 4,704 | 80 s, 58 s, 22 s | 0 of 4,288 `ir` inputs |
+| `002-native-int-mul-unchecked` | detected by `template` and now also by `regressions`' `compiled_ir_programs_reach_compiled_code` | 3, 9, 21 | 42 s, 64 s, 16 s | 0 of 4,288 |
+| `004-gc-interior-addresses` | not detected | 0, 0, 0 | not detected in two sessions; the third **stopped at 24 s by an unrelated finding** | not detected |
+
+Every exploration finding of 001 and 002 was replayed on the clean build,
+which agreed on it. The third 004 session's finding fails on the clean build
+too, and on `c5be4fc`: an `ir` entry that returns while it holds a `Shared`
+cell's lock, which `verify` accepts and a debug assertion in the run's exit
+path panics on ([#728](https://github.com/myuon/cove/issues/728); kept as
+`fuzz/regressions/ir/known/a-lock-held-at-return`). It is not counted as a
+detection of 004.
+
+**Inferred:** 001 and 002 are found on `ir` now because their trigger states —
+a `<` between equal operands, an overflowing product — occur in compiled code,
+which they did not before; the replay counts are small (0.02–0.45% of a
+corpus) because a compiled helper's answer reaches the entry's result only
+through the fold, and most helpers stop early (a full comparison of two
+successes is 13–25% of what ran). Mutant 004 is still not reached: the native
+tier does not compile `AddrOfField` (it is outside `cove_native`'s subset), so
+an interior address is never held by a compiled frame, and whether an `ir`
+program ever collects while an interior address is the only root is still
+not measured — that is issue 725's.
+
+## 7. The small heap is sized from the program's literals (issue 724)
+
+Section 5's third item, done:
+[ADR 0124](adr/0124-the-small-heap-is-sized-from-the-program-s-literals.md)
+gives `vm-gc` and `native-gc` the words the program's literals took on `vm`
+and 2^9 words above them, where ADR 0113 gave them 2^11 words in all. The
+ADR has the replay that chose 2^9.
+
+### Measured: the same budget, before and after
+
+`scripts/fuzz-measure.sh <target> 180 --runs 3 --fork 4 --replay`, seeds 1–3,
+the same starting corpora (`scripts/fuzz-seed-corpus.sh` at `c5be4fc`: 8
+`differential` inputs, 419 `differential_source`), on the setup's machine.
+**Before** is `c5be4fc`, **after** `e29452e`. In-session counts, the three
+seeds:
+
+| `differential` | before | after |
+|---|---|---|
+| executions counted | 7,413 / 9,086 / 7,393 | 8,494 / 7,874 / 6,771 |
+| small-heap runs that did not start where `vm` did | **258 / 197 / 539** | **0 / 0 / 0** |
+| `vm-gc` collected (programs) | 1,436 / 953 / 2,048 | 1,462 / 1,801 / 1,953 |
+| a collection under a compiled frame (programs) | 1,318 / 759 / 1,831 | 1,298 / 1,605 / 1,852 |
+| `vm-gc` ran out of memory | 587 / 490 / 1,559 | 410 / 374 / 486 |
+| `vm-gc` vs `native-gc`, compared in full | 7,412 / 9,059 / 7,390 | 8,482 / 7,865 / 6,771 |
+| of those, both success | 2,879 / 4,741 / 2,109 | 3,920 / 3,599 / 1,806 |
+| prefix-only programs, of which the common prefix was empty | 593, 517 / 519, 439 / 1,571, 1,213 | 430, 310 / 395, 274 / 494, 373 |
+| mismatches | 0 | 0 |
+
+| `differential_source` | before | after |
+|---|---|---|
+| executions counted | 144,889 / 106,460 / 77,705 | 194,886 / 73,960 / 149,377 |
+| ran | 2,419 / 2,305 / 1,998 | 2,799 / 1,861 / 2,722 |
+| small-heap runs that did not start where `vm` did | 1 / 72 / 172 | 0 / 0 / 0 |
+| `vm-gc` collected (programs) | 787 / 800 / 804 | 998 / 586 / 843 |
+| a collection under a compiled frame (programs) | 629 / 810 / 934 | 772 / 599 / 810 |
+| `vm-gc` ran out of memory | 255 / 435 / 399 | 421 / 145 / 365 |
+| `vm-gc` vs `native-gc` both success, in full | 746 / 816 / 800 | 932 / 529 / 972 |
+| mismatches | 0 | 0 |
+
+And replaying each session's grown `differential` corpus once an input (the
+before corpora with the before build, the after with the after):
+
+| `differential`, corpus | before | after |
+|---|---|---|
+| inputs | 1,576 / 1,697 / 1,299 | 1,613 / 1,520 / 1,266 |
+| small-heap runs that did not start | 80 / 66 / 118 | 0 / 0 / 0 |
+| `vm-gc` collected | 367 / 261 / 383 | 373 / 398 / 374 |
+| a collection under a compiled frame | 336 / 208 / 347 | 328 / 340 / 349 |
+| `vm-gc` ran out of memory | 169 / 137 / 308 | 85 / 83 / 88 |
+| prefix-only, of which empty | 169, 149 / 142, 120 / 309, 250 | 89, 64 / 89, 57 / 88, 63 |
+
+**Measured:** no small-heap run fails before its first instruction now on
+either source target, and the programs that collect, and that collect under
+a compiled frame, are as many or more; the out-of-memory stops and the
+programs compared only by an empty prefix fell by a third to two thirds on
+`differential`. The `differential_source` sessions vary more between seeds
+than between the two builds.
+
+### Measured: mutant 003, before and after
+
+`scripts/fuzz-mutant-experiment.sh 003-gc-innermost-frame-under-compiled-code`
+on each build, replaying the committed seeds and regressions, exploring
+3 × 300 s (`-fork=4`) from the starting corpora above with every input that
+found the mutant removed:
+
+| | before (`c5be4fc`) | after (`e29452e`) |
+|---|---|---|
+| dedicated tests | `gc_roots`, `native_tier` | the same |
+| inputs of the `differential_source` starting corpus that found it | 26 of 419 | 34 of 419 |
+| new exploration, `differential` | 14 s, 25 s, 12 s | 20 s, 13 s, 19 s |
+| new exploration, `differential_source` | 75 s, 55 s, 119 s | 136 s, 111 s, 48 s |
+
+**Inferred:** the change does not move the time to find 003 by more than
+the spread between seeds; it does make eight more of the repository's
+programs find it on replay, which is consistent with more of them collecting
+under a compiled frame once nothing runs out of memory before starting.
+
+## 8. More shapes of root, and an interior root (issue 725)
+
+Section 5's fourth item, done. `gc_roots.rs` holds twelve programs (six
+more: a `Map<String, String>`, an enum carrying a `String`, an `Option` and a
+`Result` of one, a closure capturing a closure, a string in each frame of a
+recursion twelve deep, and a string the innermost frame holds while it
+allocates and then returns), and `tests/interior_roots.rs` holds an IR program
+whose object is kept by nothing but an address into it
+([FUZZING.md, "Roots of compiled frames"](FUZZING.md#roots-of-compiled-frames)).
+
+### Measured: each new shape did what the test says
+
+`cargo test --profile checked -p cove-fuzz --features template --test
+gc_roots --test interior_roots -- --nocapture`, over section 7's small heap
+(the literals and 2^9 words):
+
+| seed | heap (words) | collections | under a compiled frame | the same, loop emptied | encoded instructions on `native` / on `vm` | calls into compiled code |
+|---|---|---|---|---|---|---|
+| `gc-root-map` | 565 | 33 | 33 | 0 | 20 / 410,493 | 28 |
+| `gc-root-enum` | 530 | 31 | 31 | 0 | 20 / 410,126 | 20 |
+| `gc-root-option` | 528 | 31 | 31 | 0 | 20 / 408,711 | 16 |
+| `gc-root-closure-closure` | 518 | 32 | 32 | 0 | 20 / 409,907 | 20 |
+| `gc-root-recursion` | 514 | 41 | 41 | 1 | 22 / 411,642 | 82 |
+| `gc-root-callee-holds` | 520 | 31 | 31 | 0 | 20 / 410,023 | 16 |
+
+The six of section 3, over the new heap, collect 31–35 times each (7–8 over
+2^11 words in all). `interior-root`: `vm-gc` collected 11 times while the
+address was the object's only root, `vm` none, and every mode answered 42.
+
+### Measured: mutants 003 and 004, again
+
+`scripts/fuzz-mutant-experiment.sh` at this change, dedicated tests and the
+committed seeds and regressions (no exploration):
+
+| mutant | dedicated tests | committed corpora | before (sections 4 and 7) |
+|---|---|---|---|
+| `003-gc-innermost-frame-under-compiled-code` | `gc_roots` (11 of its 12 programs), `native_tier` | 11 of 14 `differential_source` seeds — every `gc-root-*` but `gc-root-string-callee`; 1 of 6 `differential` | 5 of 9 seeds |
+| `004-gc-interior-addresses` | **detected**: `interior_roots` | **detected**: `fuzz/seeds/image/interior-root` (`vm` and `vm-gc`: the answers differ) | **not detected** by any route |
+
+**Measured:** 004 is now found by `cargo t` and by the first replay of the
+committed `image` seeds. **Inferred:** the reason it was found by nothing
+before is the one section 4 gave — the defect's state, an object whose only
+root is an address into it, does not arise from source — and not that the
+collector's interior roots were unobservable: given the state, the
+comparison of `vm` with `vm-gc` sees it at once. That the fuzzer *makes* the
+state on its own is still not shown: the `ir` explorations of section 6 did
+not, and the native tier cannot compile a function that holds one.
+
 ## What is not known from these
 
 - How the four mutants' detection would move with a longer budget or more
   seeds: three seeds of five minutes each is a spread, not a distribution.
 - Whether `ir` programs ever hold the only reference to an object in an
-  interior address across a collection (mutant 004 on `ir`).
+  interior address across a collection (mutant 004 on `ir`). Section 8 has a
+  program that does, written by hand; whether the generator makes one is
+  still not measured.
 - Anything about the defects nobody has written: the detection of four
   chosen mutants is not a detection rate.
 - Whether any of this would notice a defect: a count of what was compared is

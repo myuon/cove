@@ -153,6 +153,77 @@ fn generated_programs_reach_the_end() {
     );
 }
 
+/// The `ir` inputs committed before the compiled profile existed still build
+/// the programs they built: none of them begins with a byte that selects it
+/// (`irgen::is_compiled`), and their names are listed here so that one added
+/// later — which may be a compiled program on purpose — is not held to it.
+#[test]
+fn the_ir_inputs_from_before_the_compiled_profile_are_still_free() {
+    for name in [
+        "seeds/ir/seed-64",
+        "seeds/ir/seed-512",
+        "seeds/ir/seed-2048",
+        "regressions/ir/await-at-another-width",
+        "regressions/ir/lock-on-an-object-then-a-forged-view",
+        "regressions/ir/place-offset-round-a-loop",
+    ] {
+        let bytes = std::fs::read(fuzz_dir().join(name)).expect("a committed input");
+        assert!(!cove_fuzz::irgen::is_compiled(&bytes), "{name}");
+    }
+}
+
+/// The compiled profile's promise (issue 723), over fixed inputs: most of
+/// what it writes verifies and starts, the native tier runs compiled code in
+/// a share of them, and every mode agrees. Before the profile, `ir` ran
+/// compiled code in one of `ir-stats`' first thousand programs.
+///
+/// Where this build or host has no native tier (a lone `cargo test -p
+/// cove-fuzz`, or anything but x86-64 Unix) the native half checks nothing,
+/// as `gc_roots.rs` does.
+#[test]
+fn compiled_ir_programs_reach_compiled_code() {
+    use cove_fuzz::differential::Mode;
+
+    let total = 48u64;
+    let (mut verified, mut started, mut native, mut native_skipped) = (0, 0, 0, false);
+    for seed in 0..total {
+        let mut data = cove_fuzz::ir::stats_input(seed);
+        // The low three bits of the first byte choose the profile.
+        data[0] = (data[0] & !7) | 2;
+        let subject = cove_fuzz::irgen::from_bytes(&data);
+        let report = cove_fuzz::ir::run(subject);
+        assert!(
+            report.runs.mismatch.is_none(),
+            "seed {seed}: {}",
+            report.describe()
+        );
+        if report.verified.is_err() {
+            continue;
+        }
+        verified += 1;
+        let vm = &report.runs.observed[0];
+        if vm.instructions.unwrap_or(0) > 0 {
+            started += 1;
+        }
+        match report.runs.observed.iter().find(|o| o.mode == Mode::Native) {
+            Some(o) if o.native_calls.unwrap_or(0) > 0 => native += 1,
+            Some(_) => {}
+            None => native_skipped = true,
+        }
+    }
+    assert!(verified * 2 >= total, "{verified} of {total} verified");
+    assert_eq!(
+        started, verified,
+        "a verified compiled program did not start"
+    );
+    if !native_skipped {
+        assert!(
+            native * 2 >= verified,
+            "compiled code ran in {native} of {verified} verified programs"
+        );
+    }
+}
+
 /// Programs that are not UTF-8 are not inputs at all, and an empty one is a
 /// program with no `main`. Neither may panic.
 #[test]
@@ -228,6 +299,35 @@ fn the_modes_agree_over_fixed_inputs() {
         collected > 0,
         "no generated program collected on the small heap"
     );
+}
+
+/// The small heap is sized from the program's literals (ADR 0124, issue
+/// 724): over fixed generated programs, a small-heap mode starts whenever
+/// `vm` does — before, 3.7–5.9% of a session's small-heap runs ran out of
+/// memory before their first instruction.
+#[test]
+fn the_small_heap_modes_start_whenever_vm_does() {
+    use cove_fuzz::differential::Mode;
+
+    for seed in 0..32u64 {
+        let program =
+            cove_fuzz::generate::differential_from_bytes(&choices(seed, 256 + 64 * seed as usize));
+        let report = cove_fuzz::differential::compare(&program)
+            .unwrap_or_else(|why| panic!("seed {seed} was refused:\n{why}\n{program}"));
+        let started = |mode| {
+            report
+                .observed
+                .iter()
+                .find(|o| o.mode == mode)
+                .map(|o| o.instructions.unwrap_or(0) > 0)
+        };
+        if started(Mode::Vm) == Some(true) {
+            assert_eq!(started(Mode::VmGc), Some(true), "seed {seed}: vm-gc");
+            if let Some(native) = started(Mode::NativeGc) {
+                assert!(native, "seed {seed}: native-gc");
+            }
+        }
+    }
 }
 
 /// The differential inputs committed before the run-to-completion profile

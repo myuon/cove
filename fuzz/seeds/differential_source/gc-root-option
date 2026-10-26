@@ -1,0 +1,43 @@
+use console.println
+
+fn found(seed: Int) -> Option<String> {
+  if seed > 0 {
+    Some("found:{seed}:{seed * 31}")
+  } else {
+    None
+  }
+}
+
+fn parsed(seed: Int) -> Result<String, Error> {
+  if seed > 0 {
+    Ok("parsed:{seed}:{seed * 977}")
+  } else {
+    Err(Error(message: "no"))
+  }
+}
+
+// An `Option<String>` and a `Result<String, Error>` held in a compiled frame
+// while it allocates enough to collect, then unwrapped and read.
+fn holdOption(seed: Int) -> String {
+  let maybe = found(seed)
+  let result = parsed(seed)
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  let a = maybe.unwrapOr("none")
+  let b = match result {
+    Ok(text) => text
+    Err(error) => error.message
+  }
+  "{a} {b} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdOption(7))?
+  println(holdOption(11))?
+  Ok(())
+}

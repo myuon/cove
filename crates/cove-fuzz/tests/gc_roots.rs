@@ -10,7 +10,10 @@
 //!
 //! 1. builds a value that holds references (a string, a vector of strings, a
 //!    struct with a string and an array, a closure whose environment holds a
-//!    string, a string in each of three frames);
+//!    string, a string in each of three frames; and, since issue 725, a map
+//!    of strings, an enum carrying a string, an `Option` and a `Result` of
+//!    one, a closure capturing a closure, a string in each frame of a
+//!    recursion, and a string the innermost frame holds and returns);
 //! 2. holds it in a frame of a function the native tier compiles;
 //! 3. allocates enough garbage in that frame (or in a compiled callee) for the
 //!    small heap to collect several times;
@@ -46,12 +49,20 @@
 //!
 //! [issue 681]: https://github.com/myuon/cove/issues/681
 
-use cove_fuzz::differential::{probe, Mode, GC_HEAP_WORDS};
+use cove_fuzz::differential::{gc_heap_words, probe, Mode, GC_ALLOWANCE_WORDS};
 use cove_runtime::trace::RunOutcome;
 
-/// The heap the compiled runs are made over: the differential targets'
-/// small one, on which these programs collect several times.
-const SMALL: usize = GC_HEAP_WORDS;
+/// The heap the interpreter's run is given, which it ignores: it has none.
+const SMALL: usize = GC_ALLOWANCE_WORDS;
+
+/// The heap the compiled runs of `text` are made over: the differential
+/// targets' small one ([`gc_heap_words`], ADR 0124) — the literals the
+/// program places on `vm`, and `GC_ALLOWANCE_WORDS` above them — on which these
+/// programs collect several times.
+fn small_heap(text: &str) -> usize {
+    let vm = probe(text, Mode::Vm, LARGE, &[]).expect("it checks");
+    gc_heap_words(vm.observed.literal_words.expect("a lowered mode counts"))
+}
 
 /// The heap the encoded run is made over for its instruction count: the
 /// harness's ordinary one.
@@ -66,7 +77,7 @@ struct Case {
     expected: &'static str,
 }
 
-const CASES: [Case; 6] = [
+const CASES: [Case; 12] = [
     Case {
         name: "gc-root-string",
         holders: &["holdString"],
@@ -99,6 +110,42 @@ const CASES: [Case; 6] = [
         holders: &["outer", "middle", "inner"],
         expected: "outer:7:49 [middle:8:248 [inner:9:8793 13211]]\n\
                    outer:11:77 [middle:12:372 [inner:13:12701 13811]]\n",
+    },
+    // Issue 725's shapes.
+    Case {
+        name: "gc-root-map",
+        holders: &["holdMap"],
+        expected: "first:217 second:6839 2 13211\nfirst:341 second:10747 2 13811\n",
+    },
+    Case {
+        name: "gc-root-enum",
+        holders: &["holdEnum"],
+        expected: "named named:7:217 pair pair:7:6839 7 empty 13211\n\
+                   named named:11:341 pair pair:11:10747 11 empty 13811\n",
+    },
+    Case {
+        name: "gc-root-option",
+        holders: &["holdOption"],
+        expected: "found:7:217 parsed:7:6839 13211\nfound:11:341 parsed:11:10747 13811\n",
+    },
+    Case {
+        name: "gc-root-closure-closure",
+        holders: &["holdNested"],
+        expected: "outer(inner:7:217/1) outer(inner:7:217/2) 13211\n\
+                   outer(inner:11:341/1) outer(inner:11:341/2) 13811\n",
+    },
+    Case {
+        name: "gc-root-recursion",
+        holders: &["descend", "churn"],
+        expected: "d12:84<d11:77<d10:70<d9:63<d8:56<d7:49<d6:42<d5:35<d4:28<d3:21<d2:14<d1:7<d0:0 \
+                   13211>>>>>>>>>>>>\n\
+                   d12:132<d11:121<d10:110<d9:99<d8:88<d7:77<d6:66<d5:55<d4:44<d3:33<d2:22<d1:11<d0:0 \
+                   13811>>>>>>>>>>>>\n",
+    },
+    Case {
+        name: "gc-root-callee-holds",
+        holders: &["holdAndCall", "build"],
+        expected: "mine:7:49 [made:7:217:6839 13211]\nmine:11:77 [made:11:341:10747 13811]\n",
     },
 ];
 
@@ -153,7 +200,8 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
             case.name
         );
 
-        let native = probe(&text, Mode::Native, SMALL, case.holders).expect("it checks");
+        let small = small_heap(&text);
+        let native = probe(&text, Mode::Native, small, case.holders).expect("it checks");
         let o = &native.observed;
         // 2. The holders are functions of their own, and compiled.
         for (name, kept, compiled) in &native.functions {
@@ -187,7 +235,7 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
         let control = probe(
             &text.replace(LOOP, NO_LOOP),
             Mode::Native,
-            SMALL,
+            small,
             case.holders,
         )
         .expect("it checks");
@@ -216,9 +264,9 @@ fn a_compiled_frame_keeps_what_it_holds_across_collections() {
         assert_eq!(vm.observed.stdout, o.stdout, "{}", case.name);
         // What was measured, for `--nocapture` and docs/FUZZ_EVALUATION.md.
         eprintln!(
-            "{}: {} collections, {under} under a compiled frame ({without} without the loop); \
-             encoded instructions {encoded_native} on native, {encoded_vm} on vm; {} calls \
-             entered compiled code",
+            "{}: heap {small} words; {} collections, {under} under a compiled frame ({without} \
+             without the loop); encoded instructions {encoded_native} on native, {encoded_vm} on \
+             vm; {} calls entered compiled code",
             case.name,
             o.collections.unwrap_or(0),
             o.native_calls.unwrap_or(0),
