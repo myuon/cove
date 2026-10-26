@@ -1,0 +1,10 @@
+use clock.timeout
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let yes = !timeout(1s) { false }?
+  let sum = timeout(1s) { 40 }? + 2
+  let ordered = timeout(1s) { 1 }? < 2
+  println("{yes} {sum} {ordered}")?
+  Ok(())
+}

@@ -5708,6 +5708,15 @@ impl<'a> Checker<'a> {
 
     fn unary(&mut self, op: UnaryOp, operand: &Expr, span: Span) -> Ty {
         let ty = self.expr(operand, None);
+        // `!` is defined on `Bool` alone, so whatever an `Any` turns out to
+        // hold, the answer — if there is one — is a `Bool`. Saying so is what
+        // lets the lowering open the box at `Bool` (a run-time check, as for
+        // an `Any` beside a typed operand) instead of applying `not` to the
+        // box itself, which the verifier refused (issue 721). `-` has three
+        // answers and nothing here picks one, so it stays an `Any`.
+        if op == UnaryOp::Not && ty == Ty::Any {
+            return Ty::Bool;
+        }
         if ty.is_wild() {
             return ty;
         }
