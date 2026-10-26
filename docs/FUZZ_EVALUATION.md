@@ -392,6 +392,84 @@ missing, not by what is imaginable.
    inputs the front end refuses, so speeding up the standard library's check
    would raise its rate, but what it runs is what limits it.
 
+## 6. `ir` reaches compiled code (issue 723)
+
+Section 5's first item, done: the `ir` generator has a *compiled* profile
+beside the free one ([FUZZING.md, "The VM-level targets"](FUZZING.md#the-vm-level-targets)),
+and a refused entry argument is drawn only by a wild program.
+
+**Why a quarter of `ir`'s programs never started** (measured over `ir-stats`'
+first 1,000 fixed inputs at `c5be4fc`): 119 of the 473 that verified did not
+start, every one of them refused at the boundary with `this value is not the
+…`, and every one of those had a `Unit` argument. The generator drew one
+argument in eight as `Unit` on purpose — and `Unstructured::ratio` answers
+`true` once the input is used up, so a program whose input ran out drew
+`Unit` for every argument.
+
+### Measured: the same budget, before and after
+
+`scripts/fuzz-measure.sh ir 180 --runs 3 --fork 4 --replay`, seeds 1–3, from
+the same 6-input starting corpus (`scripts/fuzz-seed-corpus.sh ir` at
+`c5be4fc`, without the compiled seeds this change adds), on the setup's
+machine with a load average of 5–7. **Before** is `c5be4fc`, **after**
+`70598e3` (this change). Per session, the three seeds:
+
+| | before | after |
+|---|---|---|
+| executions counted | 80,770 / 113,905 / 96,093 | 77,186 / 181,073 / 119,395 |
+| verified | 55,460 / 82,016 / 72,867 | 56,134 / 143,513 / 97,663 |
+| started on `vm` (of verified) | 76% / 68% / 75% | 100% / 99.97% / 99.99% |
+| full, every mode success | 3,758 / 6,302 / 3,695 | 7,357 / 35,837 / 21,919 |
+| **of those, native ran** | **7 / 8 / 0** | **2,138 / 27,077 / 16,175** |
+| native ran (programs) | 100 / 452 / 88 (0.1–0.6% of ran) | 4,142 / 69,777 / 34,632 (7.4–48.6%) |
+| a collection under a compiled frame (programs) | 27 / 323 / 6 | 153 / 1,198 / 768 |
+| mismatches | 0 | 0 |
+
+And what the grown corpora *executed* in a function the tier compiles
+(`cove-fuzz coverage ir`, once an input; programs, the three seeds):
+
+| key | before: executed in compiled code | after |
+|---|---|---|
+| programs measured | 2,877 / 3,676 / 3,170 | 3,331 / 4,426 / 4,108 |
+| `Call` | 0 / 0 / 0 | 29 / 319 / 190 |
+| `Alloc` | 6 / 5 / 5 | 246 / 1,300 / 914 |
+| `Arith.Int.Mul` | 0 / 0 / 0 | 21 / 69 / 73 |
+| `Store` | 0 / 0 / 0 | 58 / 100 / 238 |
+| state `CmpImmBranch.Lt:equal` (a counted loop's last test) | 0 / 0 / 0 | 43 / 145 / 104 |
+| state `Cmp.Int.Lt:equal` | 0 / 0 / 0 | 3 / 6 / 6 |
+| state `Arith.Int.Mul` or `ArithImm.Mul` overflowing | 0 / 0 / 0 | 3 / 10 / 21 |
+
+### Measured: mutants 001, 002 and 004 on `ir`
+
+`scripts/fuzz-mutant-experiment.sh` at `70598e3`, replaying the seeds, the
+regressions and the three *after* corpora, and exploring 3 × 180 s
+(`-fork=4`) from the 6-input starting corpus:
+
+| mutant | dedicated tests | corpus replay (after corpora) | new exploration, 3 × 180 s | before (section 4) |
+|---|---|---|---|---|
+| `001-native-int-lt-is-le` | detected (`gc_roots`, `template`, `native_tier`, as before) | 1 of 3,999, 8 of 5,141, 2 of 4,704 | 80 s, 58 s, 22 s | 0 of 4,288 `ir` inputs |
+| `002-native-int-mul-unchecked` | detected by `template` and now also by `regressions`' `compiled_ir_programs_reach_compiled_code` | 3, 9, 21 | 42 s, 64 s, 16 s | 0 of 4,288 |
+| `004-gc-interior-addresses` | not detected | 0, 0, 0 | not detected in two sessions; the third **stopped at 24 s by an unrelated finding** | not detected |
+
+Every exploration finding of 001 and 002 was replayed on the clean build,
+which agreed on it. The third 004 session's finding fails on the clean build
+too, and on `c5be4fc`: an `ir` entry that returns while it holds a `Shared`
+cell's lock, which `verify` accepts and a debug assertion in the run's exit
+path panics on ([#728](https://github.com/myuon/cove/issues/728); kept as
+`fuzz/regressions/ir/known/a-lock-held-at-return`). It is not counted as a
+detection of 004.
+
+**Inferred:** 001 and 002 are found on `ir` now because their trigger states —
+a `<` between equal operands, an overflowing product — occur in compiled code,
+which they did not before; the replay counts are small (0.02–0.45% of a
+corpus) because a compiled helper's answer reaches the entry's result only
+through the fold, and most helpers stop early (a full comparison of two
+successes is 13–25% of what ran). Mutant 004 is still not reached: the native
+tier does not compile `AddrOfField` (it is outside `cove_native`'s subset), so
+an interior address is never held by a compiled frame, and whether an `ir`
+program ever collects while an interior address is the only root is still
+not measured — that is issue 725's.
+
 ## What is not known from these
 
 - How the four mutants' detection would move with a longer budget or more

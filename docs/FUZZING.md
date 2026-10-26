@@ -224,8 +224,9 @@ undefined behaviour.
 - `ir` builds a program from the input with `crates/cove-fuzz/src/irgen.rs`.
   It chooses by `Repr` and layout, so that about half of what it writes
   verifies and the rest probes the verifier: 473 of 1,000 fixed inputs
-  verified on 2026-10-25, and every one of the 87 instruction kinds the
-  generator knows appeared in a program that verified.
+  verified on 2026-10-25, and 580 on 2026-10-26 with the compiled profile
+  below; every one of the 87 instruction kinds the generator knows appeared
+  in a program that verified, both times.
   It has two profiles, chosen by the input's first byte
   (`irgen::is_compiled`: 2, 3 or 5 modulo 8, three eighths of what a
   fuzzer makes from nothing; no input committed before the profile existed
