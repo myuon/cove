@@ -18,8 +18,9 @@
 # The three routes, reported apart:
 #
 #   1. dedicated tests: the test files that exist for what the mutant breaks
-#      (`gc_roots`, `regressions`, `cove-native`'s `template`, `cove-runtime`'s
-#      `native_tier`), run in the mutant's worktree;
+#      (`gc_roots`, `interior_roots`, `regressions`, `cove-native`'s
+#      `template`, `cove-runtime`'s `native_tier`), run in the mutant's
+#      worktree;
 #   2. corpus replay: `cove-fuzz stats <target> <corpus>` with the mutant's
 #      build, over corpora that existed before the experiment;
 #   3. new exploration: scripts/fuzz-measure.sh --until-finding from a
@@ -77,7 +78,7 @@ dedicated() {
   failed=$(grep -E '^test .* FAILED$|^---- ' "$out/test-$name.log" | sed 's/^---- //; s/ stdout ----$//' | sort -u | tr '\n' ' ' || true)
   say "dedicated $name: $([ $status = 0 ] && echo passed || echo DETECTED) in $(( $(date +%s) - start ))s ${failed:+(failed: $failed)}"
 }
-dedicated gc_roots cargo test --profile checked -p cove-fuzz --features template --test gc_roots --test regressions
+dedicated gc_roots cargo test --profile checked -p cove-fuzz --features template --test gc_roots --test interior_roots --test regressions
 dedicated template cargo test --profile checked -p cove-native --features template --test template
 dedicated native_tier cargo test --profile checked -p cove-runtime --features template --test native_tier
 

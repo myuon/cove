@@ -547,12 +547,62 @@ the spread between seeds; it does make eight more of the repository's
 programs find it on replay, which is consistent with more of them collecting
 under a compiled frame once nothing runs out of memory before starting.
 
+## 8. More shapes of root, and an interior root (issue 725)
+
+Section 5's fourth item, done. `gc_roots.rs` holds twelve programs (six
+more: a `Map<String, String>`, an enum carrying a `String`, an `Option` and a
+`Result` of one, a closure capturing a closure, a string in each frame of a
+recursion twelve deep, and a string the innermost frame holds while it
+allocates and then returns), and `tests/interior_roots.rs` holds an IR program
+whose object is kept by nothing but an address into it
+([FUZZING.md, "Roots of compiled frames"](FUZZING.md#roots-of-compiled-frames)).
+
+### Measured: each new shape did what the test says
+
+`cargo test --profile checked -p cove-fuzz --features template --test
+gc_roots --test interior_roots -- --nocapture`, over section 7's small heap
+(the literals and 2^9 words):
+
+| seed | heap (words) | collections | under a compiled frame | the same, loop emptied | encoded instructions on `native` / on `vm` | calls into compiled code |
+|---|---|---|---|---|---|---|
+| `gc-root-map` | 565 | 33 | 33 | 0 | 20 / 410,493 | 28 |
+| `gc-root-enum` | 530 | 31 | 31 | 0 | 20 / 410,126 | 20 |
+| `gc-root-option` | 528 | 31 | 31 | 0 | 20 / 408,711 | 16 |
+| `gc-root-closure-closure` | 518 | 32 | 32 | 0 | 20 / 409,907 | 20 |
+| `gc-root-recursion` | 514 | 41 | 41 | 1 | 22 / 411,642 | 82 |
+| `gc-root-callee-holds` | 520 | 31 | 31 | 0 | 20 / 410,023 | 16 |
+
+The six of section 3, over the new heap, collect 31–35 times each (7–8 over
+2^11 words in all). `interior-root`: `vm-gc` collected 11 times while the
+address was the object's only root, `vm` none, and every mode answered 42.
+
+### Measured: mutants 003 and 004, again
+
+`scripts/fuzz-mutant-experiment.sh` at this change, dedicated tests and the
+committed seeds and regressions (no exploration):
+
+| mutant | dedicated tests | committed corpora | before (sections 4 and 7) |
+|---|---|---|---|
+| `003-gc-innermost-frame-under-compiled-code` | `gc_roots` (11 of its 12 programs), `native_tier` | 11 of 14 `differential_source` seeds — every `gc-root-*` but `gc-root-string-callee`; 1 of 6 `differential` | 5 of 9 seeds |
+| `004-gc-interior-addresses` | **detected**: `interior_roots` | **detected**: `fuzz/seeds/image/interior-root` (`vm` and `vm-gc`: the answers differ) | **not detected** by any route |
+
+**Measured:** 004 is now found by `cargo t` and by the first replay of the
+committed `image` seeds. **Inferred:** the reason it was found by nothing
+before is the one section 4 gave — the defect's state, an object whose only
+root is an address into it, does not arise from source — and not that the
+collector's interior roots were unobservable: given the state, the
+comparison of `vm` with `vm-gc` sees it at once. That the fuzzer *makes* the
+state on its own is still not shown: the `ir` explorations of section 6 did
+not, and the native tier cannot compile a function that holds one.
+
 ## What is not known from these
 
 - How the four mutants' detection would move with a longer budget or more
   seeds: three seeds of five minutes each is a spread, not a distribution.
 - Whether `ir` programs ever hold the only reference to an object in an
-  interior address across a collection (mutant 004 on `ir`).
+  interior address across a collection (mutant 004 on `ir`). Section 8 has a
+  program that does, written by hand; whether the generator makes one is
+  still not measured.
 - Anything about the defects nobody has written: the detection of four
   chosen mutants is not a detection rate.
 - Whether any of this would notice a defect: a count of what was compared is

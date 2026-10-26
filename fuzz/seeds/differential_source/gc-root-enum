@@ -1,0 +1,36 @@
+use console.println
+
+enum Held {
+  Empty
+  Named(String)
+  Pair(String, Int)
+}
+
+fn describe(held: Held) -> String {
+  match held {
+    Held.Empty => "empty"
+    Held.Named(name) => "named {name}"
+    Held.Pair(name, n) => "pair {name} {n}"
+  }
+}
+
+// An enum whose payload is a reference, held in a compiled frame while it
+// allocates enough to collect, then matched and read.
+fn holdEnum(seed: Int) -> String {
+  let named = Held.Named("named:{seed}:{seed * 31}")
+  let pair = Held.Pair("pair:{seed}:{seed * 977}", seed)
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{describe(named)} {describe(pair)} {describe(Held.Empty)} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdEnum(7))?
+  println(holdEnum(11))?
+  Ok(())
+}

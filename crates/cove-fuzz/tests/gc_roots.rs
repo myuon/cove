@@ -10,7 +10,10 @@
 //!
 //! 1. builds a value that holds references (a string, a vector of strings, a
 //!    struct with a string and an array, a closure whose environment holds a
-//!    string, a string in each of three frames);
+//!    string, a string in each of three frames; and, since issue 725, a map
+//!    of strings, an enum carrying a string, an `Option` and a `Result` of
+//!    one, a closure capturing a closure, a string in each frame of a
+//!    recursion, and a string the innermost frame holds and returns);
 //! 2. holds it in a frame of a function the native tier compiles;
 //! 3. allocates enough garbage in that frame (or in a compiled callee) for the
 //!    small heap to collect several times;
@@ -74,7 +77,7 @@ struct Case {
     expected: &'static str,
 }
 
-const CASES: [Case; 6] = [
+const CASES: [Case; 12] = [
     Case {
         name: "gc-root-string",
         holders: &["holdString"],
@@ -107,6 +110,42 @@ const CASES: [Case; 6] = [
         holders: &["outer", "middle", "inner"],
         expected: "outer:7:49 [middle:8:248 [inner:9:8793 13211]]\n\
                    outer:11:77 [middle:12:372 [inner:13:12701 13811]]\n",
+    },
+    // Issue 725's shapes.
+    Case {
+        name: "gc-root-map",
+        holders: &["holdMap"],
+        expected: "first:217 second:6839 2 13211\nfirst:341 second:10747 2 13811\n",
+    },
+    Case {
+        name: "gc-root-enum",
+        holders: &["holdEnum"],
+        expected: "named named:7:217 pair pair:7:6839 7 empty 13211\n\
+                   named named:11:341 pair pair:11:10747 11 empty 13811\n",
+    },
+    Case {
+        name: "gc-root-option",
+        holders: &["holdOption"],
+        expected: "found:7:217 parsed:7:6839 13211\nfound:11:341 parsed:11:10747 13811\n",
+    },
+    Case {
+        name: "gc-root-closure-closure",
+        holders: &["holdNested"],
+        expected: "outer(inner:7:217/1) outer(inner:7:217/2) 13211\n\
+                   outer(inner:11:341/1) outer(inner:11:341/2) 13811\n",
+    },
+    Case {
+        name: "gc-root-recursion",
+        holders: &["descend", "churn"],
+        expected: "d12:84<d11:77<d10:70<d9:63<d8:56<d7:49<d6:42<d5:35<d4:28<d3:21<d2:14<d1:7<d0:0 \
+                   13211>>>>>>>>>>>>\n\
+                   d12:132<d11:121<d10:110<d9:99<d8:88<d7:77<d6:66<d5:55<d4:44<d3:33<d2:22<d1:11<d0:0 \
+                   13811>>>>>>>>>>>>\n",
+    },
+    Case {
+        name: "gc-root-callee-holds",
+        holders: &["holdAndCall", "build"],
+        expected: "mine:7:49 [made:7:217:6839 13211]\nmine:11:77 [made:11:341:10747 13811]\n",
     },
 ];
 
