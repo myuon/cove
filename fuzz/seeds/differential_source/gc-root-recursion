@@ -1,0 +1,32 @@
+use console.println
+
+fn churn(seed: Int) -> Int {
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  junk
+}
+
+// A string in every frame of a recursion twelve deep; the deepest frame
+// allocates enough to collect, and each frame reads its own string on the
+// way back up.
+fn descend(depth: Int, seed: Int) -> String {
+  let held = "d{depth}:{seed * depth}"
+  if depth == 0 {
+    let junk = churn(seed)
+    "{held} {junk}"
+  } else {
+    let below = descend(depth - 1, seed)
+    "{held}<{below}>"
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(descend(12, 7))?
+  println(descend(12, 11))?
+  Ok(())
+}

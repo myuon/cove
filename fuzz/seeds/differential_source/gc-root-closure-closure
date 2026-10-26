@@ -1,0 +1,23 @@
+use console.println
+
+// A closure that captures a closure that captures a string, held in a
+// compiled frame while it allocates enough to collect, then called.
+fn holdNested(seed: Int) -> String {
+  let text = "inner:{seed}:{seed * 31}"
+  let inner = fn(n: Int) { "{text}/{n}" }
+  let outer = fn(n: Int) { "outer({inner(n)})" }
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  "{outer(1)} {outer(2)} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdNested(7))?
+  println(holdNested(11))?
+  Ok(())
+}

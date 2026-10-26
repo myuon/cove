@@ -1,0 +1,23 @@
+use console.println
+
+// A map of strings held in a compiled frame while it allocates enough to
+// collect, then read entry by entry.
+fn holdMap(seed: Int) -> String {
+  let held = Map.of(MapEntry(key: "a:{seed}", value: "first:{seed * 31}"), MapEntry(key: "b:{seed}", value: "second:{seed * 977}"))
+  var junk = 0
+  var i = 0
+  while i < 600 {
+    let g = "junk:{i}:{seed}:{i * 31}:{i * 977}"
+    junk = junk + g.byteLength()
+    i += 1
+  }
+  let first = held.get("a:{seed}").unwrapOr("missing")
+  let second = held.get("b:{seed}").unwrapOr("missing")
+  "{first} {second} {held.length()} {junk}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  println(holdMap(7))?
+  println(holdMap(11))?
+  Ok(())
+}
