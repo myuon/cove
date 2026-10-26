@@ -1,0 +1,23 @@
+# 013-verify-string-id-off-by-one
+#
+# `cove_ir::verify` admits a string id equal to the length of the
+# program's string table. Wrong only for a program that names that id,
+# which the lowering never writes.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-ir/src/verify/indices.rs b/crates/cove-ir/src/verify/indices.rs
+index ff0d80ab..e357f9e9 100644
+--- a/crates/cove-ir/src/verify/indices.rs
++++ b/crates/cove-ir/src/verify/indices.rs
+@@ -185,7 +185,8 @@ impl Scope<'_> {
+     }
+ 
+     fn string(&mut self, what: &str, id: StrId) {
+-        if id.index() >= self.sizes.strings {
++        // COVE-MUTANT 013-verify-string-id-off-by-one
++        if id.index() > self.sizes.strings {
+             self.fault(what, id.to_string(), self.sizes.strings, "strings");
+         }
+     }

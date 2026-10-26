@@ -1,0 +1,23 @@
+# 015-grant-check-skipped
+#
+# The host registry does not refuse a call whose capability the run was
+# not granted: the call reaches the host. Wrong for every such call, on
+# every evaluator alike.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/host.rs b/crates/cove-runtime/src/host.rs
+index 161adac3..b82de63c 100644
+--- a/crates/cove-runtime/src/host.rs
++++ b/crates/cove-runtime/src/host.rs
+@@ -1243,7 +1243,8 @@ impl HostRegistry {
+             args,
+             outcome: None,
+         };
+-        if !self.grants.allows(&capability) {
++        // COVE-MUTANT 015-grant-check-skipped
++        if false && !self.grants.allows(&capability) {
+             self.trace.record(refused(self.record_call(callee, &args)));
+             return Err(RuntimeError::new(format!(
+                 "`{shown}` requires the `{capability}` capability, which this run was not granted"

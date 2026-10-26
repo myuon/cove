@@ -1,0 +1,23 @@
+# 006-native-shift-count-unchecked
+#
+# Native code admits a shift count of 64 to 127, which the machine
+# masks to its low six bits, where the VM refuses any count outside
+# 0..=63. Wrong only on such a count.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+index 8fac2d8c..da7c9048 100644
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -4366,7 +4366,8 @@ impl<'a> Emit<'a> {
+         self.load_slot(RAX, a);
+         self.load_slot(RCX, n);
+         let fine = self.label();
+-        self.cmp_imm32(RCX, 64);
++        // COVE-MUTANT 006-native-shift-count-unchecked
++        self.cmp_imm32(RCX, 128);
+         self.jcc(CC_B, Target::Label(fine));
+         self.store(CTX, OFF_RAISE_A, RCX);
+         self.raise(Raise::ShiftCount);

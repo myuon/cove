@@ -14,6 +14,9 @@
 #   --runs N           exploration sessions per target, seeds 1..N (default 3)
 #   --fork F           -fork=F (default 4)
 #   --keep             leave the mutant's worktree in place afterwards
+#   --dedicated N=CMD  one more dedicated test, named N, run as CMD in the
+#                      mutant's worktree (repeatable): the suites that exist
+#                      for what the mutant breaks, beyond the default four
 #
 # The three routes, reported apart:
 #
@@ -34,7 +37,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 mutant="${1:?usage: scripts/fuzz-mutant-experiment.sh <mutant> [options]}"
 shift
 out="" seconds=300 runs=3 fork=4 keep=0
-replays=() explores=()
+replays=() explores=() extras=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) out="$2"; shift 2 ;;
@@ -44,6 +47,7 @@ while [ $# -gt 0 ]; do
     --runs) runs="$2"; shift 2 ;;
     --fork) fork="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
+    --dedicated) extras+=("$2"); shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -81,6 +85,9 @@ dedicated() {
 dedicated gc_roots cargo test --profile checked -p cove-fuzz --features template --test gc_roots --test interior_roots --test regressions
 dedicated template cargo test --profile checked -p cove-native --features template --test template
 dedicated native_tier cargo test --profile checked -p cove-runtime --features template --test native_tier
+for spec in ${extras[@]+"${extras[@]}"}; do
+  dedicated "${spec%%=*}" bash -c "${spec#*=}"
+done
 
 # Replays `$2` through target `$1` with the mutant's build: the JSON to
 # `$3.json`, the findings to `$3.txt`. A replay the process does not survive

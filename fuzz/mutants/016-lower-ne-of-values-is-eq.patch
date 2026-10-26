@@ -1,0 +1,23 @@
+# 016-lower-ne-of-values-is-eq
+#
+# The lowering answers `!=` between two values the instruction set
+# compares by walking them (strings, arrays, structs, enums with a
+# payload) as `==`. Wrong on every such `!=`, in every lowered mode.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-ir/src/lower/expr.rs b/crates/cove-ir/src/lower/expr.rs
+index 49f31d09..d34a9d9a 100644
+--- a/crates/cove-ir/src/lower/expr.rs
++++ b/crates/cove-ir/src/lower/expr.rs
+@@ -699,7 +699,8 @@ impl Body<'_> {
+             && !ordering
+             && !self.is_case_index(a.layout)
+         {
+-            let equal = op == BinaryOp::Eq;
++            // COVE-MUTANT 016-lower-ne-of-values-is-eq
++            let equal = op == BinaryOp::Eq || op == BinaryOp::Ne;
+             self.compare_values(expr, equal, lhs, dst.slot, &a, &b);
+             self.release(b, expr.span);
+             self.release(a, expr.span);

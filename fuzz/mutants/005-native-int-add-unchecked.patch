@@ -1,0 +1,23 @@
+# 005-native-int-add-unchecked
+#
+# Native code does not test `Int` addition of two slots for overflow:
+# it answers the wrapped sum where the VM traps. Wrong only on an
+# overflowing sum.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-native/src/template.rs b/crates/cove-native/src/template.rs
+index 8fac2d8c..bdeb1096 100644
+--- a/crates/cove-native/src/template.rs
++++ b/crates/cove-native/src/template.rs
+@@ -4274,7 +4274,8 @@ impl<'a> Emit<'a> {
+         match op {
+             ArithOp::Add => {
+                 self.add_rr(RAX, RCX);
+-                self.raise_unless(CC_NO, overflow);
++                // COVE-MUTANT 005-native-int-add-unchecked
++                let _ = overflow;
+                 self.store_slot(dst, RAX);
+             }
+             ArithOp::Sub => {

@@ -1,0 +1,23 @@
+# 011-gc-array-first-element-only
+#
+# A collection traces only the first element of an array, vector store
+# or set. Wrong only when a later element is the last reference to an
+# object read after its block is reused.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/mem.rs b/crates/cove-runtime/src/vm/mem.rs
+index be852531..ad5640cc 100644
+--- a/crates/cove-runtime/src/vm/mem.rs
++++ b/crates/cove-runtime/src/vm/mem.rs
+@@ -1692,7 +1692,8 @@ impl Space {
+             Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                 let elem = &layouts[elem.index()];
+                 let stride = elem.width();
+-                for at in 0..len {
++                // COVE-MUTANT 011-gc-array-first-element-only
++                for at in 0..len.min(1) {
+                     self.trace_run(alloc, addr, at * stride, &elem.words, work);
+                 }
+             }

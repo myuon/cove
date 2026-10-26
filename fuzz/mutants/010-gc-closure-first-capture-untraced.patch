@@ -1,0 +1,28 @@
+# 010-gc-closure-first-capture-untraced
+#
+# A collection does not trace a closure's first capture. Wrong only when
+# that capture holds the last reference to an object read after its block
+# is reused.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/mem.rs b/crates/cove-runtime/src/vm/mem.rs
+index be852531..1d07142b 100644
+--- a/crates/cove-runtime/src/vm/mem.rs
++++ b/crates/cove-runtime/src/vm/mem.rs
+@@ -1736,9 +1736,12 @@ impl Space {
+             // the capture is rather than behind another address.
+             Shape::Closure { captures, .. } => {
+                 let mut at = 1;
+-                for id in captures {
++                for (n, id) in captures.iter().enumerate() {
+                     let capture = &layouts[id.index()];
+-                    self.trace_run(alloc, addr, at, &capture.words, work);
++                    // COVE-MUTANT 010-gc-closure-first-capture-untraced
++                    if n > 0 {
++                        self.trace_run(alloc, addr, at, &capture.words, work);
++                    }
+                     at += capture.width();
+                 }
+             }

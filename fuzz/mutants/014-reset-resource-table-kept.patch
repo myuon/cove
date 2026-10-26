@@ -1,0 +1,22 @@
+# 014-reset-resource-table-kept
+#
+# A run's edge does not empty the machine's resource table when the
+# embedder pins nothing (ADR 0116): host resources named by one run stay
+# named in the next. Wrong only for a machine run more than once.
+#
+# An artificial defect for measuring the fuzzing harness (issue 681).
+# Never applied to this tree: scripts/fuzz-mutant.sh applies it in a
+# scratch worktree. docs/FUZZ_EVALUATION.md records what found it.
+diff --git a/crates/cove-runtime/src/vm/exec.rs b/crates/cove-runtime/src/vm/exec.rs
+index a81c3b42..cb8f90a6 100644
+--- a/crates/cove-runtime/src/vm/exec.rs
++++ b/crates/cove-runtime/src/vm/exec.rs
+@@ -2464,7 +2464,7 @@ impl<'a> Machine<'a> {
+     /// a run parked or yielded in between keeps its table.
+     pub(crate) fn release_resources(&mut self) {
+         if !self.mem.holds_pinned() {
+-            self.held_resources().clear();
++            // COVE-MUTANT 014-reset-resource-table-kept
+             return;
+         }
+         if !self.held_resources().trim_due() {
