@@ -100,7 +100,7 @@ documentation the long form of what follows.
 | `ast` | the tree-walking interpreter, ADR 0034's semantic oracle | the checked program |
 | `vm` | the encoded VM (`OwnedVm` over a `PreparedProgram`), 2 MiB heap | `cove_ir::lower_entry`'s program |
 | `native` | the same with `PreparedProgram::with_native`: the template tier where it compiled a function, the encoded VM where it refused one | the same |
-| `vm-gc` | the encoded VM over a 2^11-word (16 KiB) heap, so a program that allocates collects | the same |
+| `vm-gc` | the encoded VM over a small heap — the words the program's literals took on `vm`, and 2^9 (4 KiB) more ([ADR 0124](adr/0124-the-small-heap-is-sized-from-the-program-s-literals.md)) — so a program that allocates collects, and none runs out of memory before its first instruction | the same |
 | `native-gc` | the native tier over the same small heap: compiled frames' roots at a collection | the same |
 | `image` | the encoded VM over the program `cove_ir::serial` writes and reads back — the path `cove fmt` runs | `decode(encode(..))` |
 
@@ -677,8 +677,9 @@ programs to that stronger standard, one shape of root each:
 | `gc-root-frames` | a string in each of three nested frames; the innermost allocates |
 
 Each program builds the value, holds it in a function the native tier
-compiles, allocates about 600 short strings in a loop (on the 2^11-word heap
-of `vm-gc` and `native-gc`, several collections), and then reads the value
+compiles, allocates about 600 short strings in a loop (on the small heap of
+`vm-gc` and `native-gc` — the program's literals and 2^9 words more — several
+collections), and then reads the value
 into the line it prints. The test does not assume any of that happened; it
 measures each step, on the native tier over the small heap:
 

@@ -221,3 +221,34 @@ fn the_shapes_these_families_are_written_in_all_lower() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// An operator over an `Any` that nothing gives a type to (issue 721).
+///
+/// `-` of an `Any` may be over an `Int`, a `Float` or a `Duration`, and so
+/// may `+` of two of them; the lowering used to apply the instruction to the
+/// box and the verifier refused what it wrote, which `lower` turns into a
+/// panic. `!` of an `Any` is not here: it answers `Bool` in the checker and
+/// lowers, opening the box at `Bool`.
+#[test]
+fn an_operator_on_erased_operands_with_no_type_is_named_rather_than_emitted() {
+    assert_eq!(
+        refused(
+            "use clock.timeout\nfn f() -> Result<Unit, Error> {\n  \
+             let a = -timeout(1s) { 1 }?\n  Ok(())\n}"
+        ),
+        vec!["not yet lowered: an operator applied to a value whose type is erased"]
+    );
+    assert_eq!(
+        refused(
+            "use clock.timeout\nfn f() -> Result<Unit, Error> {\n  \
+             let b = timeout(1s) { 1 }?\n  let c = b + b\n  Ok(())\n}"
+        ),
+        vec!["not yet lowered: arithmetic on two values whose types are erased"]
+    );
+    let not = listing(
+        "use clock.timeout\nfn f() -> Result<Bool, Error> {\n  \
+         Ok(!timeout(1s) { false }?)\n}",
+        "f",
+    );
+    assert!(not.contains("unbox"), "{not}");
+}

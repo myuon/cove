@@ -301,6 +301,35 @@ fn the_modes_agree_over_fixed_inputs() {
     );
 }
 
+/// The small heap is sized from the program's literals (ADR 0124, issue
+/// 724): over fixed generated programs, a small-heap mode starts whenever
+/// `vm` does — before, 3.7–5.9% of a session's small-heap runs ran out of
+/// memory before their first instruction.
+#[test]
+fn the_small_heap_modes_start_whenever_vm_does() {
+    use cove_fuzz::differential::Mode;
+
+    for seed in 0..32u64 {
+        let program =
+            cove_fuzz::generate::differential_from_bytes(&choices(seed, 256 + 64 * seed as usize));
+        let report = cove_fuzz::differential::compare(&program)
+            .unwrap_or_else(|why| panic!("seed {seed} was refused:\n{why}\n{program}"));
+        let started = |mode| {
+            report
+                .observed
+                .iter()
+                .find(|o| o.mode == mode)
+                .map(|o| o.instructions.unwrap_or(0) > 0)
+        };
+        if started(Mode::Vm) == Some(true) {
+            assert_eq!(started(Mode::VmGc), Some(true), "seed {seed}: vm-gc");
+            if let Some(native) = started(Mode::NativeGc) {
+                assert!(native, "seed {seed}: native-gc");
+            }
+        }
+    }
+}
+
 /// `cove-fuzz stats` over the committed differential inputs (issue 704):
 /// every input is counted, none is a finding, and the counts are not empty —
 /// the generated seeds all reach a run, and some of them compare in full.

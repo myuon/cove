@@ -323,6 +323,11 @@ impl OwnedVm {
         self.vm.allocated_words()
     }
 
+    /// [`Vm::literal_words`].
+    pub fn literal_words(&self) -> u64 {
+        self.vm.literal_words()
+    }
+
     /// [`Vm::collections`].
     pub fn collections(&self) -> u64 {
         self.vm.collections()
