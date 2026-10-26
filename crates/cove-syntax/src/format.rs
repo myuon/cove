@@ -2415,7 +2415,7 @@ fn c() { }
         formatted(
             "
 /// Documented.
-export async fn run<T>(self, var count: Int, items: String...) -> Result<T, U> {
+export async fn run<T>(var count: Int, items: String...) -> Result<T, U> {
   count
 }
 ",
