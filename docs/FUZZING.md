@@ -86,6 +86,24 @@ standard library's alone (ADR 0058) — so it is reached through
 `StringBuilder`, string interpolation and the string functions that build
 their answers in one.
 
+For `differential` the generator has a second profile
+([issue 706](https://github.com/myuon/cove/issues/706)), chosen by the
+input's first byte (`generate::is_complete`: 0, 2, 3 or 6 modulo 8, half of
+what a fuzzer makes from nothing; no input committed before it begins with
+one). The list above is the **hostile** profile, which stops most runs on
+purpose — in 33–51% of a session's programs did every mode reach success —
+so what a program does after its first stop is compared by nobody. The
+**complete** profile keeps the operations and draws operands that let the
+run end: small integers, odd divisors, shift counts masked to 0..=63, whole
+ranges, capacities, radixes, widths and digit counts a call accepts, ASCII
+bytes, non-empty `split` and `replace` needles, no `*=` round a loop, a
+recursion depth masked to 0..=15, and an `Err` in `main` read with
+`unwrapOr` rather than propagated. Over 300 fixed inputs each, every mode ran
+to success in 270 complete programs (the other 30 ran out of memory on the
+small heap only) and in 120 hostile ones. `ir`'s compiled profile (below) is
+the IR target's equivalent: forward jumps, counted loops, initialised
+values.
+
 ## The differential targets
 
 `differential` and `differential_source` run one program every way this
