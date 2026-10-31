@@ -1,13 +1,16 @@
 name: Fuzz
 
-# Issue 681's priority 1, ADR 0112. docs/FUZZING.md is the manual.
+# Issue 681's three tiers (ADR 0112; docs/FUZZING.md, "In CI";
+# docs/FUZZ_EVALUATION.md, section 12, is why each is what it is):
 #
-# Two lengths of the same job: a one-minute smoke on every pull request that
-# touches Rust, which is there to catch a harness that no longer builds or an
-# input that crashes at once, and a long run on a schedule, which is where
-# findings come from. CI's main job is already the expensive one; this
-# workflow is kept out of it so a pull request's ordinary gate is not slowed
-# by it, and the smoke is nine short parallel jobs rather than one long one.
+# - pull request: `scripts/fuzz-budget.sh pr`, four workers and two minutes
+#   of wall clock from a small chosen corpus. The fixed tests and the
+#   regression inputs are `cargo t`'s, in ci.yml, and are not replaced by it.
+# - nightly: `scripts/fuzz-budget.sh nightly`, four workers for fifteen
+#   minutes, growing the corpus the next night starts from.
+# - weekly, or by hand: every target for 25 minutes, as the nightly run used
+#   to be; and the slow measurements — coverage by component and the
+#   artificial defects against the PR plan — which no pull request pays for.
 
 on:
   pull_request:
@@ -15,22 +18,28 @@ on:
     paths:
       - "crates/**"
       - "fuzz/**"
-      - "scripts/fuzz*.sh"
+      - "scripts/fuzz*"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/fuzz.yml"
   schedule:
     # 18:00 UTC, 03:00 in Tokyo: once a day, when nobody is waiting on a runner.
     - cron: "0 18 * * *"
+    # And on Sundays at 20:00 UTC, the weekly tier.
+    - cron: "0 20 * * 0"
   workflow_dispatch:
     inputs:
+      tier:
+        description: "pr, nightly or weekly"
+        required: false
+        default: "nightly"
       seconds:
-        description: "Seconds to fuzz each target"
+        description: "Seconds to fuzz each target, in the weekly tier's broad run"
         required: false
         default: "1500"
 
 concurrency:
-  group: fuzz-${{ github.ref }}
+  group: fuzz-${{ github.ref }}-${{ github.event_name }}-${{ github.event.schedule }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Nothing here writes to the repository, and no secret is read: a fuzz run
@@ -45,16 +54,16 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  fuzz:
-    name: fuzz ${{ matrix.target }}
+  budget:
+    name: fuzz ${{ (github.event_name == 'pull_request' || inputs.tier == 'pr') && 'pr' || 'nightly' }} budget
+    if: >-
+      github.event_name == 'pull_request'
+      || (github.event_name == 'schedule' && github.event.schedule == '0 18 * * *')
+      || (github.event_name == 'workflow_dispatch' && inputs.tier != 'weekly')
     runs-on: ubuntu-latest
-    # The long run is 25 minutes of fuzzing; the rest is the ASan build
-    # (about four minutes cold) and the corpus.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 50 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [parse, compile, run, structured, image, differential, differential_source, ir, ir_mutate]
+    timeout-minutes: ${{ (github.event_name == 'pull_request' || inputs.tier == 'pr') && 25 || 45 }}
+    env:
+      PLAN: ${{ (github.event_name == 'pull_request' || inputs.tier == 'pr') && 'pr' || 'nightly' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,10 +76,115 @@ jobs:
           cargo +nightly --version
           cargo fuzz --version
 
-      # One cache per target, because each job links only its own binary and
-      # the nine would otherwise race to save the same key. The key ends in
-      # the run id for ci.yml's reason: a key that always misses always saves,
-      # and `restore-keys` takes the newest.
+      # Both sanitizer builds and the stable `cove-fuzz`, in one cache. The key
+      # ends in the run id for ci.yml's reason: a key that always misses
+      # always saves, and `restore-keys` takes the newest.
+      - name: Cache cargo and the fuzz builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            fuzz/target
+            target
+          key: ${{ runner.os }}-fuzz-budget-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-budget-
+
+      # The nightly run keeps the corpus it grew, one cache a target, so each
+      # night starts where the last stopped. A pull request never restores
+      # it: its corpus is fuzz/corpus-pr, chosen and committed.
+      - name: Restore the nightly corpus
+        if: env.PLAN == 'nightly'
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-nightly-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-nightly-corpus-
+
+      # The build is timed apart from the budget (build.txt); the budget is
+      # wall clock from the first corpus copy to the summary.
+      - name: Fuzz
+        run: |
+          extra=()
+          if [ "$PLAN" = nightly ]; then
+            mkdir -p fuzz/corpus
+            for t in $(awk '$1 ~ /^[0-9]+$/ {print $2}' fuzz/plans/nightly.plan | sort -u); do
+              # A corpus that does not exist yet starts from the PR corpus.
+              [ -d "fuzz/corpus/$t" ] || scripts/fuzz-pr-corpus.sh materialise "$t" "fuzz/corpus/$t" || true
+            done
+            extra=(--keep-corpus fuzz/corpus --corpus committed)
+          fi
+          scripts/fuzz-budget.sh "$PLAN" --seed "$GITHUB_RUN_NUMBER" --out fuzz/budget "${extra[@]}"
+
+      - name: Summarise
+        if: always()
+        run: |
+          { cat fuzz/budget/build.txt 2>/dev/null; echo; cat fuzz/budget/summary.md 2>/dev/null || echo "no summary: the run did not get that far"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # The counts and the summary, on every run: no input in them.
+      - name: Upload the summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ env.PLAN }}-summary-${{ github.run_id }}
+          path: |
+            fuzz/budget/meta.txt
+            fuzz/budget/build.txt
+            fuzz/budget/summary.*
+            fuzz/budget/slots/*/result.txt
+            fuzz/budget/slots/*/session.*
+          retention-days: 30
+          if-no-files-found: warn
+
+      # What a finding leaves: its input and the log. An input here may be the
+      # shape of a vulnerability, and this repository is public, so the
+      # retention is short and docs/FUZZING.md says to triage one before
+      # discussing it in the open. Uploaded on success too when there is one,
+      # because a known-like finding does not fail the run.
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ env.PLAN }}-findings-${{ github.run_id }}
+          path: |
+            fuzz/budget/slots/*/artifacts
+            fuzz/budget/slots/*/fuzz.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Save the nightly corpus
+        if: always() && env.PLAN == 'nightly'
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-nightly-corpus-${{ github.run_id }}
+
+  # The weekly tier's broad run: every target, as its own job, for 25
+  # minutes with every core, from the nightly corpus where it has the target
+  # and the committed inputs otherwise. It is the only place `run`,
+  # `structured` and the targets the PR plan leaves out get a long session.
+  broad:
+    name: fuzz ${{ matrix.target }} (weekly)
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 20 * * 0')
+      || (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, compile, run, structured, image, differential, differential_source, ir, ir_mutate]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          if ! command -v cargo-fuzz > /dev/null; then
+            cargo install cargo-fuzz --locked --version 0.11.2
+          fi
       - name: Cache cargo and the fuzz build
         uses: actions/cache@v4
         with:
@@ -83,11 +197,6 @@ jobs:
           key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('**/*.rs', 'crates/*/std/**', '**/Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-fuzz-${{ matrix.target }}-
-
-      # The scheduled run keeps the corpus it grew, so each night starts
-      # where the last one stopped. It is a cache and not an artifact: it is
-      # readable by this repository's workflows only. The pull-request smoke
-      # restores it too, when one exists, and never saves.
       - name: Restore the corpus
         uses: actions/cache/restore@v4
         with:
@@ -95,92 +204,28 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
-
-      # The nightly corpus only grows (nothing minimises it yet, issue 709),
-      # and libFuzzer runs every input of it before the session's own clock
-      # starts: a 2,790-input `differential_source` corpus took 1,102 s of a
-      # 60 s smoke and ran the job past its 25 minutes. The smoke never saves,
-      # so it keeps an evenly spaced sample of at most 300 inputs, chosen by
-      # name and therefore the same on every run of one restored corpus.
-      - name: Sample the corpus for the smoke
-        if: github.event_name == 'pull_request'
-        run: |
-          dir="fuzz/corpus/${{ matrix.target }}"
-          [ -d "$dir" ] || exit 0
-          total=$(find "$dir" -type f | wc -l)
-          keep=300
-          if [ "$total" -gt "$keep" ]; then
-            find "$dir" -type f | LC_ALL=C sort \
-              | awk -v n="$total" -v k="$keep" '(NR - 1) % int((n + k - 1) / k) != 0' \
-              | xargs rm -f
-          fi
-          echo "corpus: kept $(find "$dir" -type f | wc -l) of $total inputs"
-
       - name: Seed the corpus
         run: scripts/fuzz-seed-corpus.sh ${{ matrix.target }}
-
-      # The differential and IR targets count what each input compared (issues
-      # 704 and 705, docs/FUZZING.md "What a session compared"): every process
-      # libFuzzer starts writes its counts to this directory as it goes. Empty
-      # for the other targets, which is the same as unset.
       - name: Fuzz
         env:
           COVE_FUZZ_STATS_DIR: ${{ contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target) && format('{0}/fuzz/stats/session', github.workspace) || '' }}
         run: |
-          case "${{ github.event_name }}" in
-            pull_request) seconds=60; extra=() ;;
-            workflow_dispatch) seconds="${{ github.event.inputs.seconds }}"; extra=(-fork="$(nproc)") ;;
-            *) seconds=1500; extra=(-fork="$(nproc)") ;;
-          esac
-          echo "fuzzing ${{ matrix.target }} for ${seconds}s ${extra[*]}"
-          scripts/fuzz.sh "${{ matrix.target }}" "$seconds" -- "${extra[@]}"
-
-      # What the session compared, and what its corpus compares: the session's
-      # files merged, and the corpus replayed once each by `cove-fuzz stats`,
-      # which counts a finding rather than stopping at it. Built on stable
-      # without ASan — a count is not a memory-safety question — into the
-      # cached `target/`. Whatever the fuzz step did, so a failing run still
-      # says what it had compared; and never failing the job itself, which is
-      # the fuzz step's to fail.
+          seconds="${{ inputs.seconds || '1500' }}"
+          scripts/fuzz.sh "${{ matrix.target }}" "$seconds" -- -fork="$(nproc)"
       - name: Count what was compared
         if: always() && contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target)
         continue-on-error: true
         timeout-minutes: 20
         run: |
           cargo build --profile checked -p cove-fuzz --features template
-          mkdir -p fuzz/stats/session
           {
             echo "## fuzz ${{ matrix.target }}: what was compared"
-            echo
-            echo "### This session (every execution, each \`-fork\` child counted)"
-            echo
             echo '```'
-            ./target/checked/cove-fuzz stats merge fuzz/stats/session \
-              2>&1 > fuzz/stats/session.json || true
+            ./target/checked/cove-fuzz stats merge fuzz/stats/session 2>&1 > fuzz/stats/session.json || true
+            ./target/checked/cove-fuzz stats "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" 2>&1 > fuzz/stats/corpus.json || true
+            ./target/checked/cove-fuzz coverage "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" 2>&1 > fuzz/stats/coverage.json || true
             echo '```'
-            echo
-            echo "### The corpus, replayed once each"
-            echo
-            echo '```'
-            ./target/checked/cove-fuzz stats "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" \
-              2>&1 > fuzz/stats/corpus.json || true
-            echo '```'
-            # Which instructions the corpus executed, and not only held
-            # (issue 705): a replay that watches every instruction, so the
-            # nightly run only.
-            if [ "${{ github.event_name }}" != pull_request ]; then
-              echo
-              echo "### Instructions the corpus held and executed"
-              echo
-              echo '```'
-              ./target/checked/cove-fuzz coverage "${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}" \
-                2>&1 > fuzz/stats/coverage.json || true
-              echo '```'
-            fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
-
-      # The counts are uploaded on every run, pass or fail, so a run that
-      # found nothing still says what it compared. Counts only: no input.
       - name: Upload the counts
         if: always() && contains(fromJSON('["differential","differential_source","ir","ir_mutate","image"]'), matrix.target)
         uses: actions/upload-artifact@v4
@@ -189,20 +234,12 @@ jobs:
           path: fuzz/stats
           retention-days: 30
           if-no-files-found: warn
-
       - name: Save the corpus
-        if: always() && github.event_name != 'pull_request'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
-
-      # What a crash leaves: the input libFuzzer wrote, and the log with the
-      # panic message, the sanitizer report and the seed. An input here may
-      # be the shape of a vulnerability, and this repository is public, so the
-      # retention is short and docs/FUZZING.md says to triage one before
-      # discussing it in the open. No secret is in either file: the job reads
-      # none.
       - name: Upload the crash
         if: failure()
         uses: actions/upload-artifact@v4
@@ -211,6 +248,62 @@ jobs:
           path: |
             fuzz/artifacts/${{ matrix.target }}
             fuzz/logs
-            fuzz/fuzz-*.log
           retention-days: 7
+          if-no-files-found: warn
+
+  # The weekly tier's measurements: does the PR plan still detect the
+  # representative artificial defects (docs/FUZZ_EVALUATION.md, section 12),
+  # and what would a fresh choice of the PR corpus be from the nightly
+  # corpus. Neither changes the repository: the new choice is an artifact for
+  # a person to commit.
+  measure:
+    name: fuzz weekly measurements
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 20 * * 0')
+      || (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          if ! command -v cargo-fuzz > /dev/null; then
+            cargo install cargo-fuzz --locked --version 0.11.2
+          fi
+      - name: Restore the nightly corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-nightly-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-nightly-corpus-
+      - name: Artificial defects against the PR plan
+        continue-on-error: true
+        run: |
+          scripts/fuzz-budget-mutants.sh --out fuzz/measure/weekly-mutants --plans pr --seeds 1 \
+            002-native-int-mul-unchecked 003-gc-innermost-frame-under-compiled-code \
+            012-vm-byte-at-off-by-one 013-verify-string-id-off-by-one
+          { echo '## Artificial defects, PR plan'; echo '```'; cat fuzz/measure/weekly-mutants/results.tsv; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: A fresh choice of the PR corpus
+        continue-on-error: true
+        run: |
+          pools=()
+          for t in ir differential structured; do
+            [ -d "fuzz/corpus/$t" ] && pools+=(--pool "$t=fuzz/corpus/$t")
+          done
+          only="differential_source image"
+          for t in ir differential structured; do [ -d "fuzz/corpus/$t" ] && only="$only $t"; done
+          scripts/fuzz-pr-corpus.sh select --only "$only" "${pools[@]}"
+          { echo '## A fresh PR corpus (not committed)'; echo '```'; grep -h '^# budget\|^# features' fuzz/corpus-pr/*.selection.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-weekly-measurements-${{ github.run_id }}
+          path: |
+            fuzz/measure/weekly-mutants/results.tsv
+            fuzz/measure/weekly-mutants/*/replay.txt
+            fuzz/corpus-pr
+          retention-days: 30
           if-no-files-found: warn

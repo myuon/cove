@@ -23,6 +23,7 @@ bugs nobody has seen.
 - 専用テストが見逃して fuzzing だけが見つけた欠陥がある（012、VM の `byteAt` の off-by-one）。逆に fuzzing では原理的に見えない欠陥もある：run 間の状態（014、harness は毎回新しい machine で 1 回だけ走らせる）と capability（015、全 evaluator が同じ host registry を使うので oracle がない）。
 - 探索中に本物のバグを 5 件見つけた（#720、#721、#726、#728、#734）。
 - （2026-10-31、section 11）committed seed から 1 target 300 s の session 1 回で作った corpus は、Rust の分岐（`if`/`&&` 等の条件の各側）を parser 92%、checker 57%、lowering 59%、verifier 69%、VM 52%、native 生成器 56%、GC 56% 到達する。IR 命令 key は verifier が許す 185 個中 175 個を実行（compiled code 内では 124 個）、型 × 境界値の 107 セル中 104 個を実行（compiled code 内 97 個）。到達は検出ではない。
+- （2026-11-01、section 12）4 worker・実時間約 2 分（build を除く）の PR 予算では、重点配分 B（`ir` ×2、`differential`、`image`/`parse`/`compile`）と全 target 配分 A が、人工バグ 002・003・012 をどちらも探索で 3/3 検出した（B の検出までの中央値 4.4 s、A は 9.6 s）。013 はどちらの探索も 0/3 で、#738 の固定テストと seed が検出する。以前の PR smoke は、9 target 中 7 個が 60 s 以内に初期再生を終えていなかった。
 
 **言えないこと**
 
@@ -1081,6 +1082,243 @@ source.
   checker, the VM's dispatch) has more of its decisions in the region columns.
 - **The defined keys are the verifier's.** 185 is what the verifier admits;
   `Cmp.Bool.Lt` is admitted and no source makes it.
+
+## 12. A two-minute budget on four workers (issue 681)
+
+The question is no longer what each target reaches. It is what a pull request
+should spend: **about two minutes of wall clock on four workers, not counting
+the build**, with the initial replay, exploring and shutting down all inside
+that time. Section 12 compares two plans for that budget against how the CI ran
+before, and places what the chosen plan leaves out into longer tiers.
+
+**The scope was cut on purpose.** Each configuration got 3 seeds, not 5. Four
+mutants were tried, not sixteen. A third configuration (C) was not run,
+because A and B gave no measured reason for one. Component branch coverage
+for these runs was not measured (the instrumented replay was left out for
+budget). The rest of this section says what was and was not evaluated.
+
+### How
+
+A and B at `3fb1056`, the mutant trials at `f832fc2` (this change's runner on
+origin/main `ca6c9c0` with #738; the harness is the same in both),
+2026-11-01, x86-64 macOS (i7-10700K, 16 threads, load average 3–6, shared
+with other work), nightly `rustc 1.95.0-nightly (47611e160 2026-02-12)`,
+cargo-fuzz 0.11.2.
+
+- **Runner**: `scripts/fuzz-budget.sh <plan> --no-build --seed N`, with
+  `wall 120`, `reserve 15`, every slot `-fork=1` with crashes, timeouts and
+  out-of-memory stops ignored, stopped from outside at its share's end
+  ([FUZZING.md, "A budget of workers"](FUZZING.md#a-budget-of-workers)).
+  libFuzzer seeds `N*100 + worker*10 + slot`, N = 1, 2, 3.
+- **Builds**, timed apart from the budget: `cargo fuzz build` of all nine
+  targets, 55 s without a sanitizer and 83 s with ASan (a fresh target
+  directory). In a mutant's worktree, an incremental rebuild of `cove-fuzz` and
+  both sanitizer builds took 122–172 s.
+- **Starting corpus**: the PR corpus, `scripts/fuzz-pr-corpus.sh materialise`
+  at this change. Its selection (`fuzz/corpus-pr/*.selection.txt`) took 483 s
+  and kept every feature its pool reaches. The generator targets' pool is not
+  a nightly corpus. It is a 180 s, four-worker run of `fuzz/plans/pool.plan`
+  from the committed inputs (seed 99).
+
+| target | starting inputs | of which committed seeds and regressions |
+|---|---:|---:|
+| `ir` | 99 | 9 |
+| `differential` | 39 | 11 |
+| `image` | 48 | 12 |
+| `parse`, `compile` | 37 | 1 |
+| `differential_source` | 54 | 18 |
+| `run` | 38 | 2 |
+| `ir_mutate` | 43 | 7 |
+| `structured` | 34 | 6 |
+
+- **Plans**:
+
+  | | worker 1 | worker 2 | worker 3 | worker 4 |
+  |---|---|---|---|---|
+  | **A** (`pr-a`, every target) | `differential` 60, `structured` 60 | `ir` 60, `ir_mutate` 60 | `differential_source` 60, `run`† 60 | `image`† 40, `parse`† 40, `compile`† 40 |
+  | **B** (`pr-b`, the targets that found most in section 10) | `ir` 120 | `ir` 120 | `differential` 120 | `image`† 60, `parse`† 30, `compile`† 30 |
+
+  Weights are shares of a worker's time. † means ASan; everything else is
+  built without a sanitizer. Both plans keep debug assertions and overflow
+  checks.
+
+### Measured: how the CI ran before
+
+Taken from the jobs' logs, on GitHub's `ubuntu-latest` (Linux, 4 vCPU). These
+are not the macOS numbers below. Run 41209256228 (PR #737) and run 41212672734
+(PR #738): nine jobs, each one target for `-max_total_time=60` under ASan, from
+a 300-input name-ordered sample of the nightly corpus.
+
+| | run 41209256228 | run 41212672734 |
+|---|---|---|
+| wall clock, first job start to last job end | 7 min 21 s | 5 min 37 s |
+| job time, all nine (setup, build, fuzz, counting) | 2,199 s | 2,223 s |
+| targets whose initial replay did not finish inside the 60 s | **7 of 9** | — |
+| longest initial replay | `differential_source` 206 s (704 inputs) | — |
+
+In run 41209256228 only `parse` and `ir` explored at all. The other seven spent
+the step replaying the sample, 54–206 s, and stopped at `INITED`, with no new
+input tried. The nightly run is nine jobs of 25 minutes with `-fork=4`: 17,699
+and 17,991 job-seconds, 48 minutes of wall clock (runs 40779944847 and
+41136050250).
+
+### Measured: the same budget, A and B
+
+Per run, the three seeds (`summary.json`):
+
+| | A | B |
+|---|---|---|
+| wall clock, corpus copy to summary | 106.5 / 107.0 / 107.0 s | 106.7 / 107.0 / 107.0 s |
+| of which: corpus copy / exploring (replays included) / summary | 2.6–2.7 / 103.7–104.2 / 0.1 s | 1.4 / 105.1–105.4 / 0.1 s |
+| worker time, and parallelism | 414–415 s, 3.97–3.99 | 419–420 s, 3.98–3.99 |
+| initial replay, summed over slots | 34.7 / 31.1 / 32.1 s (7.5–8.4% of worker time) | 15.4 / 15.5 / 15.5 s (3.7%) |
+| findings (clean build) | none | none |
+
+The time from a slot's start to libFuzzer's "starting to fuzz" line,
+measured to half a second (0.7 s is the floor: the process starting and the
+first poll):
+
+| slot | A: replay of budget | B: replay of budget |
+|---|---|---|
+| `ir` | 0.7 of 53 s | 0.7 of 105 s (each worker) |
+| `differential` | 3.2–3.3 of 52 s | 3.3–3.4 of 105 s |
+| `image` (ASan) | 5.2–5.3 of 36 s (15%) | 5.3 of 54 s (10%) |
+| `parse` (ASan) | 0.7 of 35 s | 0.7 of 26 s |
+| `compile` (ASan) | 4.6–4.7 of 32–34 s (14%) | 4.7 of 25 s (19%) |
+| `differential_source` | 5.2–5.8 of 52 s (11%) | — |
+| `run` (ASan) | 7.3–8.5 of 51 s (16%) | — |
+| `ir_mutate` | 1.3–3.2 of 51 s | — |
+| `structured` | 2.7–2.8 of 52 s | — |
+
+What the sessions compared (`COVE_FUZZ_STATS_DIR`, merged per slot; min–max
+over the three seeds):
+
+| | A | B |
+|---|---|---|
+| `ir`: inputs / full comparisons of successes with native code / collections under a compiled frame | 7,265–8,207 / 1,768–2,673 / 537–777 | both workers: 24,017–38,252 / 6,490–9,156 / 2,272–2,355 |
+| `differential`: inputs / full successes with native code / under a compiled frame | 509–674 / 210–467 / 52–156 | 883–1,342 / 289–771 / 180–225 |
+| `image`: inputs / full successes with native code | 5,417–15,027 / 31–35 | 12,009–23,704 / 44–89 |
+| `differential_source`: inputs / full successes with native code | 29,488–59,741 / 62–138 | — |
+| `ir_mutate`: inputs / full successes with native code | 30,767–60,494 / 15–22 | — |
+| mismatches | 0 | 0 |
+
+### Measured: what was reached at 30, 60 and 120 seconds
+
+`scripts/fuzz-budget-reach.py` over each run's final corpora. The replay is
+separate from the run: it took 76–152 s a run, 670 s for the six. Features are
+the IR instruction keys executed anywhere and in compiled code, the trigger
+states, and the 107 type × boundary cells (section 11). `parse` and `compile`
+run no program and have none.
+
+| | at 30 s | at 60 s | at 120 s | union of the three runs |
+|---|---|---|---|---|
+| A: keys / in compiled code / cells / in compiled code | 165 / 139–140 / 102–103 / 95–97 | 165 / 139–140 / 102–103 / 95–98 | 165 / 139–140 / 102–104 / 95–98 | 165 / 140 / 104 / 98 |
+| B | 165–166 / 139–140 / 102–103 / 95–98 | 165–167 / 139–140 / 102–103 / 96–99 | 165–168 / 140 / 102–103 / 96–99 | 170 / 140 / 103 / 99 |
+
+**Measured:** almost everything either plan reaches is there at 30 s, and
+nearly all of it was already in the starting corpus. Two minutes of
+exploration added at most 3 keys and 3 cells to what a run had at 30 s.
+
+What only one plan's union reached: A alone, `string.byte_at.astral.index_len`
+(from `structured`) and an overflowing compiled `Arith.Int.Sub`. B alone,
+compiled `int.mul.max`, and `Cmp.Bool.{Ge,Lt}`, `Cmp.Tag.Gt` and
+`CmpBranch.Tag.{Le,Lt}` executed (all from `ir`).
+
+**What dropping a target loses**, as the features of a run that no other target
+of the same run reached (union over the three runs):
+
+- A: `ir` 59; `differential` 3; `structured` 1; `differential_source`,
+  `ir_mutate`, `run`, `image` 0 each.
+- B: `ir` 70; `image` 28; `differential` 4.
+
+`image` has 28 here and none in A. That is because A's `differential_source`
+reaches the same `Dyn*` kinds, `CallHost` and the large-array cell from the
+same programs. Measured this way, A's `differential_source`, `ir_mutate` and
+`run` slots added nothing that another of its slots did not.
+
+### Measured: four artificial defects, 2 minutes
+
+`scripts/fuzz-budget-mutants.sh --plans "pr-a pr-b" --seeds "1 2 3"` uses
+one scratch worktree, which holds one mutant at a time. Per mutant:
+
+- **corpus replay**: every starting input through the mutant's `cove-fuzz`.
+  An input counts if it fails there and not on the clean build.
+- **new exploration**: a run from the starting corpus with those inputs
+  removed. A finding counts only if the mutant's build fails on it and the
+  clean build does not.
+
+The **fixed tests** column is `cargo t`, the PR's gate in `ci.yml`. It is
+section 10's measurement at `24fb51f`, which was not repeated here, except
+for 013, which was measured with #738.
+
+| mutant | kind | fixed tests (`cargo t`) | corpus replay, A's targets | corpus replay, B's targets | exploration A (found / tried; time to it) | exploration B |
+|---|---|---|---|---|---|---|
+| 002 | native `*` unchecked | `template`, `regressions` | `ir` 2 of 99 | `ir` 2 of 99 | **3/3**; 11.9, 14.4, 11.1 s (`ir`) | **3/3**; 5.0, 6.4, 15.1 s (`ir`) |
+| 003 | GC root, innermost compiled frame | `gc_roots`, `native_tier` | `differential_source` 17/54, `image` 5/48, `ir_mutate` 5/43, `ir` 2/99, `differential` 1/39 | `image` 5, `ir` 2, `differential` 1 | **3/3**; 7.5 s (`differential_source`), 9.6, 4.1 s (`differential`) | **3/3**; 13.4 s (`differential`), 1.2, 1.0 s (`ir`) |
+| 012 | VM `byteAt` admits = length | **none** | `differential` 4/39, `ir` 2/99 | the same | **3/3**; 4.7, 15.1, 3.6 s (`ir`) | **3/3**; 1.6, 4.4, 1.5 s (`ir`) |
+| 013 | verifier, string id = table length | `verify` unit test, `mutate` test, `regressions` (seed) — **3 tests, #738** | `ir_mutate` 1/43 (#738's seed) | **none** (`ir_mutate` is not in B) | 0/3 | 0/3 |
+
+By category, over the 24 trials:
+
+| | A | B |
+|---|---|---|
+| detected by the fixed tests | 002, 003, 013 | 002, 003, 013 |
+| detected by the initial replay | 002, 003, 012, 013 | 002, 003, 012 |
+| detected by new exploration | 002, 003, 012 (9 of 12 trials) | 002, 003, 012 (9 of 12 trials) |
+| stopped by an unrelated real defect | 0 (one known-like finding, #726's, in 003/A seed 1, reported beside the detection and not counted) | 0 |
+| not detected before the budget ran out | 013, 3 trials | 013, 3 trials |
+| a build or the runner failed | 0 | 0 |
+
+Every exploration detection was replayed on the clean build, which did not
+fail on it. A non-zero exit alone was never counted. The trials' runs took
+106.6–108.9 s each. The 24 trials with the four builds took about 70 minutes.
+
+**Inferred, not measured:** 013 is not found by two minutes of exploration
+because its trigger is narrow. The names edit is 4 of 256 edit choices. It
+must move a name to exactly the table's length, in a program whose other
+edits leave nothing else wrong. #738's fixed test shows the edit reaches
+that state within the first 57 fixed choices of a small program, so the
+state is reachable. A's single 50 s `ir_mutate` slot did not make it, three
+times out of three.
+
+### What was not evaluated
+
+- **The other twelve mutants**, including those only one target finds in
+  section 10: 008 (`ir` only), 010 and 016 (`differential` only), 006, 007 and
+  009. **Configuration C**. **Five seeds.**
+- **Component branch coverage** for these runs: the instrumented replay of
+  section 11 was not run over them.
+- **These plans on Linux.** Every number in "the same budget" is macOS. The CI
+  runs the chosen plan on every pull request, and that run is its Linux
+  measurement (FUZZING.md, "In CI").
+- **The nightly plan's detection power.** It is issue 681's initial candidate,
+  adopted as it is: four workers for 15 minutes, `ir` ×2, `differential`, and
+  `image`, `ir_mutate`, `differential_source` five minutes each. Its 60
+  worker-minutes against the old nightly's 295 runner-minutes is a cost
+  measured from the plan, not a comparison of what each finds.
+- **Unknown defects.** Four hand-written defects are not a sample of them.
+
+### What was decided
+
+- **The pull request runs B** (`fuzz/plans/pr.plan`). Measured, A and B
+  detected the same mutants by exploration (9 of 12 trials each) and reached
+  the same in their union (165 against 170 keys, 104 against 103 cells). B
+  found the three detected mutants sooner in 7 of 9 paired trials, with a
+  median of 4.4 s against 9.6 s. It spent half the initial replay (15.5 s
+  against 32 s of worker time). It has six slots, not nine. With no clear
+  difference in detection, the simpler plan is the one taken.
+- **What B leaves out goes to a longer tier, not nowhere.** `ir_mutate` and
+  `differential_source` move to the nightly run's fourth worker. `run`,
+  `structured` and every target's long session move to the weekly tier, which
+  is the old nightly's nine 25-minute jobs. A starting input B no longer
+  replays is still replayed by `cargo t`, if it is a committed seed or
+  regression. That holds for #738's 013 seed and for every GC-root seed. What
+  B loses outright is A's initial-replay detection through the PR corpus's
+  `differential_source` and `ir_mutate` selections (003: 22 more inputs; 013:
+  the seed, which `cargo t` also replays).
+- **The fixed tests, the regression inputs, the GC-root, capability and
+  lifecycle suites are not replaced by exploration.** They run in `cargo t`
+  in CI's main job, as before.
 
 ## What is not known from these
 
