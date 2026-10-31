@@ -1222,8 +1222,11 @@ as on the Mac. `compile` spent 12.9 s of its 25 s replaying the 37 programs it
 starts from, and then ran 16 inputs. **Decided from it:** `compile` now starts
 from its committed inputs alone (`scripts/fuzz-pr-corpus.sh`, `family`). The
 programs stay in `run` and `parse`'s start, and in `differential_source`'s at
-night. That change's own run is the next measurement. No mutant was run
-against it.
+night. That change's own run was run 41221928786. There the cache was
+restored and the builds were incremental: 29 s, 57 s and 35 s. The run took
+106 s and 422 worker-seconds, the whole job 257 s. `compile`'s replay took 1.1 s
+of 26 s and it ran 6,724 inputs. `image` replayed in 7.4 s of 53 s. No mutant
+was run against the change.
 
 ### Measured: what was reached at 30, 60 and 120 seconds
 
