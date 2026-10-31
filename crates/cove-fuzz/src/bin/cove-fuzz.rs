@@ -14,7 +14,9 @@
 //!                                                          TARGET is differential, differential_source, ir, ir_mutate or image
 //! cove-fuzz stats merge PATH...                            add together the files a session wrote
 //! cove-fuzz coverage <TARGET> PATH...                      replay a corpus and count which instructions its programs
-//!                                                          held and which they executed (issue 705), same TARGETs
+//!                                                          held and which they executed, and the boundary matrix
+//!                                                          (issue 705); TARGET also run or structured
+//! cove-fuzz coverage-defined                               every instruction key and matrix cell coverage counts against
 //! ```
 
 use std::path::Path;
@@ -180,6 +182,22 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
+        }
+        // What `coverage` measures against: every instruction key the
+        // verifier admits, and every cell of the boundary matrix, as JSON.
+        "coverage-defined" => {
+            let list = |items: Vec<String>| {
+                items
+                    .iter()
+                    .map(|k| format!("\"{k}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!(
+                "{{\"keys\": [{}], \"cells\": [{}]}}",
+                list(cove_fuzz::coverage::defined_keys()),
+                list(cove_fuzz::matrix::cells())
+            );
         }
         "explain" => {
             for path in rest {

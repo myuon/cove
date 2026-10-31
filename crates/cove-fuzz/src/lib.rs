@@ -79,6 +79,7 @@ pub mod differential;
 pub mod generate;
 pub mod ir;
 pub mod irgen;
+pub mod matrix;
 pub mod mutate;
 pub mod stats;
 
