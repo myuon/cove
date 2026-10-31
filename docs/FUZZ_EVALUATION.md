@@ -1202,6 +1202,29 @@ over the three seeds):
 | `ir_mutate`: inputs / full successes with native code | 30,767–60,494 / 15–22 | — |
 | mismatches | 0 | 0 |
 
+### Measured: B on the CI's runner
+
+This is the pull request's own run (run 41221324367, `ubuntu-latest`, 4 vCPU,
+2026-11-01), with the plan and corpus as compared above. It is one seed: the
+run number.
+
+| | |
+|---|---|
+| build, timed apart from the budget (cache missed: a new cache key) | `cove-fuzz` 52 s; ASan `image`, `parse`, `compile` 113 s; no sanitizer `ir`, `differential` 72 s |
+| wall clock, corpus copy to summary | **106 s** of the 120 s budget (corpus 1.0 s, exploring 105.3 s, summary 0.1 s) |
+| worker time, parallelism | 420 s, 3.99 |
+| the whole job, setup and build included | 385 s, against 2,199–2,223 job-seconds for the nine jobs before |
+| initial replay: `ir` / `differential` / `image` / `parse` / `compile` | 1.1 / 6.5 / 13.0 / 1.1 / **12.9** s, of 105 / 105 / 53 / 27 / 25 s |
+| findings | none |
+
+**Measured:** on the runner, the ASan replays take two to three times as long
+as on the Mac. `compile` spent 12.9 s of its 25 s replaying the 37 programs it
+starts from, and then ran 16 inputs. **Decided from it:** `compile` now starts
+from its committed inputs alone (`scripts/fuzz-pr-corpus.sh`, `family`). The
+programs stay in `run` and `parse`'s start, and in `differential_source`'s at
+night. That change's own run is the next measurement. No mutant was run
+against it.
+
 ### Measured: what was reached at 30, 60 and 120 seconds
 
 `scripts/fuzz-budget-reach.py` over each run's final corpora. The replay is
@@ -1288,9 +1311,9 @@ times out of three.
   009. **Configuration C**. **Five seeds.**
 - **Component branch coverage** for these runs: the instrumented replay of
   section 11 was not run over them.
-- **These plans on Linux.** Every number in "the same budget" is macOS. The CI
-  runs the chosen plan on every pull request, and that run is its Linux
-  measurement (FUZZING.md, "In CI").
+- **A on Linux, and B on Linux beyond one run.** Every number in "the same
+  budget" is macOS. B's single run on the runner is above, and no mutant was
+  run there.
 - **The nightly plan's detection power.** It is issue 681's initial candidate,
   adopted as it is: four workers for 15 minutes, `ir` ×2, `differential`, and
   `image`, `ir_mutate`, `differential_source` five minutes each. Its 60

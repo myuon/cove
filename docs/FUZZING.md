@@ -955,7 +955,8 @@ more than the whole budget. The starting corpus is:
   The mandatory inputs keep every GC-root shape and every fixed regression.
 
 The pools are the repository's programs (`differential_source`, whose list
-also starts `run`, `parse` and `compile`), the same programs as image bodies
+also starts `run` and `parse`; `compile` starts from its committed inputs
+alone, because under ASan on the CI's runner the list took half its slot), the same programs as image bodies
 (`image`, whose list also starts `ir_mutate`), and, for the generator targets
 (`ir`, `differential`, `structured`), a grown corpus given with
 `--pool T=DIR`. The inputs chosen from a grown corpus are committed under
