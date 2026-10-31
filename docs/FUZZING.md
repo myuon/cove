@@ -928,8 +928,8 @@ and its findings. The run as a whole gets its phases, worker-seconds and
 parallelism.
 
 ```console
-$ scripts/fuzz-budget.sh pr-b                    # builds, then two minutes on four workers
-$ scripts/fuzz-budget.sh pr-b --no-build --seed 2 --out fuzz/measure/b2
+$ scripts/fuzz-budget.sh pr                       # builds, then two minutes on four workers
+$ scripts/fuzz-budget.sh pr --no-build --seed 2 --out fuzz/measure/b2
 $ scripts/fuzz-budget.sh nightly --keep-corpus fuzz/corpus
 ```
 
@@ -955,7 +955,8 @@ more than the whole budget. The starting corpus is:
   The mandatory inputs keep every GC-root shape and every fixed regression.
 
 The pools are the repository's programs (`differential_source`, whose list
-also starts `run`, `parse` and `compile`), the same programs as image bodies
+also starts `run` and `parse`; `compile` starts from its committed inputs
+alone, because under ASan on the CI's runner the list took half its slot), the same programs as image bodies
 (`image`, whose list also starts `ir_mutate`), and, for the generator targets
 (`ir`, `differential`, `structured`), a grown corpus given with
 `--pool T=DIR`. The inputs chosen from a grown corpus are committed under
@@ -965,32 +966,48 @@ which features the choice leaves to the nightly corpus.
 
 ## In CI
 
-`.github/workflows/fuzz.yml`, kept out of `ci.yml` so the ordinary gate is not
-slowed by it:
+`.github/workflows/fuzz.yml` is kept out of `ci.yml`, so the ordinary gate is
+not slowed by it. It runs three tiers. FUZZ_EVALUATION.md section 12 says why
+each tier is what it is, and what was measured before the choice:
 
 - **On a pull request** that touches `crates/`, `fuzz/`, the fuzz scripts,
-  the manifests or the lockfile: each target, as its own job, for 60 seconds
-  on `ubuntu-latest` under ASan. The point is a harness that still builds and
-  an input that does not crash at once; findings come from the long run.
-- **Daily at 18:00 UTC, and by hand** (`workflow_dispatch`, with a length in
-  seconds): each target for 25 minutes with `-fork=$(nproc)`. The corpus each
-  target grew is saved in the Actions cache and restored the next night, so
-  the nightly run accumulates.
-- **For the differential targets, on every run**, pass or fail: the session
-  runs with `COVE_FUZZ_STATS_DIR` set, and afterwards a stable, non-ASan
-  `cove-fuzz` merges the session's files and replays the job's corpus
-  ([What a session compared](#what-a-session-compared)). Both summaries go
-  into the job's step summary, and the JSON is uploaded as
-  `fuzz-stats-<target>-<run id>`, kept thirty days. It holds counts and
-  reasons only, never an input. The step does not fail the job; the fuzz
-  step does that.
-- **On a crash**, the input and the log are uploaded as an artifact with a
-  seven-day retention. The workflow reads no secret and has `contents: read`
-  only, so neither holds anything private. This repository is public, and so
-  are its Actions artifacts to anyone signed in to GitHub: an input that
-  crashes the runtime may be the shape of a vulnerability, so triage it before
-  opening a public issue that quotes it, and use a private security advisory
-  for one that reaches memory unsafety.
+  the manifests or the lockfile, one job runs `scripts/fuzz-budget.sh pr`:
+  four workers and two minutes of wall clock. Worker 1 and worker 2 run `ir`,
+  worker 3 runs `differential`, and worker 4 runs `image`, `parse` and
+  `compile` under ASan. The build is timed apart from the budget. The run
+  starts from the PR corpus (`fuzz/corpus-pr`), never from the nightly one.
+  It fails on a new finding or on a worker that could not run. It reports a
+  known-like finding and does not fail on it. The fixed tests and every
+  committed seed and regression are `cargo t`'s, in `ci.yml`, and exploration
+  does not replace them.
+- **Daily at 18:00 UTC**, one job runs `scripts/fuzz-budget.sh nightly`: four
+  workers for fifteen minutes. Worker 1 and worker 2 run `ir`, worker 3 runs
+  `differential`, and worker 4 runs `image`, `ir_mutate` and
+  `differential_source` for five minutes each. The corpus it grows
+  (`fuzz/corpus`) is saved in the Actions cache and restored the next night.
+- **Weekly, on Sunday at 20:00 UTC, and by hand** (`workflow_dispatch` with
+  `tier: weekly`), there are two parts. The first is every target as its own
+  job for 25 minutes with `-fork=$(nproc)`, under ASan, from its own long
+  corpus. This is how the nightly run worked before, and it is the only long
+  session `run` and `structured` get. The second is the measurements:
+  `scripts/fuzz-budget-mutants.sh` runs the PR plan against four
+  representative mutants (002, 003, 012, 013), one seed each, and
+  `scripts/fuzz-pr-corpus.sh select` re-chooses the PR corpus from the
+  nightly corpus. The new choice is uploaded as an artifact for a person to
+  commit. The workflow cannot push. `workflow_dispatch` with `tier: pr` or
+  `tier: nightly` runs the corresponding plan by hand.
+- **Every run uploads its summary** (`summary.md` in the step summary;
+  `summary.json`, each slot's `result.txt` and its session counts as an
+  artifact kept thirty days) on success, failure or timeout alike. It holds
+  counts and reasons only, never an input.
+- **Findings** (inputs and libFuzzer's logs) are uploaded whenever there are
+  any, with a seven-day retention. They are uploaded even when the run passed,
+  because a known-like finding does not fail it. The workflow reads no secret
+  and has `contents: read` only, so neither holds anything private. This
+  repository is public, and so are its Actions artifacts to anyone signed in
+  to GitHub. An input that crashes the runtime may be the shape of a
+  vulnerability, so triage it before opening a public issue that quotes it,
+  and use a private security advisory for one that reaches memory unsafety.
 
 ## AddressSanitizer: what it sees and what it does not
 

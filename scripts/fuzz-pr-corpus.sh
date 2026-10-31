@@ -11,8 +11,9 @@
 # added, and what the choice leaves to the nightly corpus). Three families:
 #
 #   differential_source  the repository's programs, measured by
-#                        `differential_source`; the list also starts `run`,
-#                        `parse` and `compile`
+#                        `differential_source`; the list also starts `run`
+#                        and `parse` (`compile` starts from its committed
+#                        inputs alone)
 #   image                the same programs as image bodies, measured by
 #                        `image`; the list also starts `ir_mutate`
 #   ir, differential, structured
@@ -44,7 +45,10 @@ committed() {
 
 family() {
   case "$1" in
-    differential_source | run | parse | compile) echo differential_source ;;
+    # `compile` starts from its committed inputs alone: under ASan on the
+    # CI's runner the list's 36 programs took 12.9 s of its 24 s
+    # (docs/FUZZ_EVALUATION.md, section 12).
+    differential_source | run | parse) echo differential_source ;;
     image | ir_mutate) echo image ;;
     *) echo "$1" ;;
   esac
