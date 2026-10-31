@@ -111,7 +111,8 @@ host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
 llvm="$sysroot/lib/rustlib/$host/bin"
 covbin="$root/target/coverage/checked/cove-fuzz"
 if has branches; then
-  CARGO_TARGET_DIR="$root/target/coverage" \
+  # A build script is instrumented too; its profile goes beside the build.
+  LLVM_PROFILE_FILE="$root/target/coverage/build-%p.profraw" CARGO_TARGET_DIR="$root/target/coverage" \
     RUSTFLAGS="-C instrument-coverage -Z coverage-options=branch" \
     cargo +nightly build --profile checked -p cove-fuzz --features template --bin cove-fuzz --quiet
   mkdir -p "$out/branches"
