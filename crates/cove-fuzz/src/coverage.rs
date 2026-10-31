@@ -35,6 +35,14 @@
 //! The counts are of **programs**: `coverage.<key>.executed` is how many
 //! programs executed an instruction of that key at least once.
 //!
+//! The watched run also reads the operands of the instructions
+//! [`crate::matrix`] classifies — up to [`TRIGGER_READS`] times a site, or
+//! [`OBJECT_READS`] where reading them renders a heap object — and counts
+//! each cell of the type × boundary matrix they fall in as
+//! `matrix.<cell>.executed` and `matrix.<cell>.executed_compiled`, by the
+//! rule `executed_compiled` follows. [`defined_keys`] and
+//! [`crate::matrix::cells`] are what the counts are against.
+//!
 //! # What it does not say
 //!
 //! - **The native tier's own execution is not observed.** The debugger
