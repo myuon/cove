@@ -859,6 +859,110 @@ counted: one that fails there too is the toolchain's own, which is how
      to the repository trips a ratchet"): decompose the rise rather than
      accepting it.
 
+## A budget of workers
+
+`scripts/fuzz-budget.sh <plan>` runs a **plan** — several workers, each a
+sequence of targets — under one wall-clock budget, and records what each part
+of it cost. Issue 681's short-budget work introduced it, and FUZZ_EVALUATION.md
+section 12 measures it. A plan is a file in `fuzz/plans/`:
+
+```text
+wall 120          # the whole run's wall clock: corpus copy, every replay, exploring, the summary
+reserve 15        # kept at the end, for stopping the workers and sorting findings
+1 ir 120 none     # <worker> <target> <weight> <sanitizer>
+2 ir 120 none
+3 differential 120 none
+4 image 60 address
+4 parse 30 address
+4 compile 30 address
+```
+
+A weight is a share of the worker's time, not a number of seconds. The runner
+fits each worker's lines into `wall - reserve`, starting-corpus replay
+included. A line gets the share its weight is of the worker's remaining
+weights, so a slot that ends early passes its time on to the next. These
+things hold whatever the plan says:
+
+- **The clock is outside libFuzzer.** libFuzzer runs its starting corpus
+  before it looks at `-max_total_time`. The PR smoke's sampled nightly corpus
+  used 206 s of a 60 s `differential_source` budget this way (CI run
+  41209256228). So each slot runs in a process group of its own and is
+  stopped at its share's end, with `SIGINT` and then `SIGKILL`. Its counts,
+  inputs and log are on disk whether it stops or is stopped.
+- **One finding does not end the exploration.** Every process is `-fork=1`
+  with `-ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1`. That is
+  libFuzzer's own way of going on after a crash, and every finding is still
+  written to the slot's `artifacts/`.
+- **Two builds, by purpose.** `none` is for the targets that compare modes: a
+  disagreement is not a memory-safety question, and that build is several
+  times faster. `address` is for the targets that read untrusted bytes. Both
+  keep debug assertions and overflow checks (`cargo fuzz build` without
+  `-O`). They are built into `fuzz/target/san-<sanitizer>/`, and the build is
+  timed apart from the budget (`build.txt`).
+
+Afterwards `scripts/fuzz-budget-summary.py` replays every finding once through
+`cove-fuzz` to read its message, and sorts it:
+
+- by **kind**: crash, timeout, out-of-memory, leak (from libFuzzer's file
+  name). A slot that exited non-zero with no finding and was not stopped by
+  the runner **failed to run** — the harness, the binary or the machine.
+- by **signature**: the target, the kind, and the first line of the message
+  with every number made `#`. Findings with the same signature are *alike*:
+  they stopped at the same place with the same words. **That is not a proof
+  that one defect caused both**, and every input is kept, not only the first
+  of a group.
+- as **known-like** or **new**: known-like if a reproducer under
+  `fuzz/regressions/*/known/` gives the same signature when it is replayed the
+  same way. A known-like finding is reported and does not fail the run, so an
+  unfixed bug that already has an issue does not block every pull request. A
+  new finding fails it (exit status 1), and so does a slot that failed to run
+  (2). A finding that does not fail when replayed outside libFuzzer (a
+  timeout, or a crash that needed ASan) is reported as not reproduced. It is
+  never dropped.
+
+`summary.json` and `summary.md` are written whether the run succeeds, fails or
+is stopped. They hold each slot's wall time, how long its starting-corpus
+replay took (to half a second, from when libFuzzer says it has started
+fuzzing), its executions, the session's counts (`COVE_FUZZ_STATS_DIR`, merged)
+and its findings. The run as a whole gets its phases, worker-seconds and
+parallelism.
+
+```console
+$ scripts/fuzz-budget.sh pr-b                    # builds, then two minutes on four workers
+$ scripts/fuzz-budget.sh pr-b --no-build --seed 2 --out fuzz/measure/b2
+$ scripts/fuzz-budget.sh nightly --keep-corpus fuzz/corpus
+```
+
+### The pull request's corpus
+
+A run starts from `scripts/fuzz-pr-corpus.sh materialise <target>`, and never
+from the nightly corpus. That corpus only grows, and replaying all of it costs
+more than the whole budget. The starting corpus is:
+
+- every committed seed and regression of the target, whatever it costs.
+  `known/` is left out: those inputs still fail, and they are what a run's
+  findings are compared against;
+- the inputs `fuzz/corpus-pr/<family>.list` names. `scripts/fuzz-pr-corpus.sh
+  select` chose them from a pool by **what each reaches for the time its
+  replay costs**: the IR instruction kinds it executes, anywhere and in
+  compiled code; the trigger states; the type × boundary matrix's cells; and
+  whether a full comparison of successes ran native code or a collection
+  happened under a compiled frame (`cove-fuzz coverage-each`). Inputs are
+  added greedily, most new features per millisecond first, until the
+  replay budget (`--budget`, default 6 s a target) is spent or nothing adds a
+  feature. These are semantic features, not branches: a boundary that a
+  branch-coverage minimiser would call redundant is kept for its own sake.
+  The mandatory inputs keep every GC-root shape and every fixed regression.
+
+The pools are the repository's programs (`differential_source`, whose list
+also starts `run`, `parse` and `compile`), the same programs as image bodies
+(`image`, whose list also starts `ir_mutate`), and, for the generator targets
+(`ir`, `differential`, `structured`), a grown corpus given with
+`--pool T=DIR`. The inputs chosen from a grown corpus are committed under
+`fuzz/corpus-pr/<target>/`, because a generator's input is not a program in
+the tree. `<family>.selection.txt` records why each input was chosen, and
+which features the choice leaves to the nightly corpus.
+
 ## In CI
 
 `.github/workflows/fuzz.yml`, kept out of `ci.yml` so the ordinary gate is not
