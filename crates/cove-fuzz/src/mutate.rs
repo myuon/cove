@@ -652,42 +652,62 @@ mod tests {
     /// that the lowering placed names for it.
     const SOURCE: &str = "use console.println\n\nstruct Point {\n  x: Int\n  y: Int\n}\n\n/// m\nexport fn main() -> Result<Unit, Error> {\n  println(\"{Point(x: 1, y: 2)}\")?\n  Ok(())\n}\n";
 
-    /// The names edit moves a name to each side of the string table's
-    /// boundary within the first few thousand fixed choices, and a clean
-    /// `verify` refuses every edited program that names a string past the
-    /// table — the target can explore mutant 013's boundary, and the clean
-    /// build does not mistake it for a finding.
+    /// Every string id `program` holds in a name.
+    fn name_ids(program: &mut Program) -> Vec<&mut StrId> {
+        let names = program
+            .names
+            .iter_mut()
+            .flat_map(|names| names.name.iter_mut().chain(names.parts.iter_mut()));
+        let resources = program
+            .resource_names
+            .iter_mut()
+            .map(|named| &mut named.text);
+        names.chain(resources).collect()
+    }
+
+    /// The names edit moves a name to each side of the string table's end
+    /// within the first few thousand fixed choices, and among them to an
+    /// edit whose only fault is a name at the table's length — the program
+    /// verifies once that name is put back. A clean `verify` refuses it and
+    /// the target reports nothing: the target explores mutant 013's
+    /// boundary, and the clean build does not take the boundary for a
+    /// finding. With the mutant, `verify` accepts it and this fails.
     #[test]
     fn a_name_is_moved_to_each_side_of_the_string_tables_end() {
         let body = crate::image_body(SOURCE).expect("the source lowers to an image");
         let mut reached = [false; 3];
+        let mut alone = None;
         for seed in 0..4_000u64 {
             let data = input(&body, &crate::ir::choices(seed, 24));
-            let subject = from_bytes(&data).expect("the body reads");
-            let program = &subject.program;
+            let mut program = from_bytes(&data).expect("the body reads").program;
             let len = program.strings.len();
-            let ids: Vec<usize> = program
-                .names
-                .iter()
-                .flat_map(|names| names.name.iter().chain(&names.parts))
-                .chain(program.resource_names.iter().map(|named| &named.text))
-                .map(|id| id.index())
-                .collect();
+            let ids: Vec<usize> = name_ids(&mut program).iter().map(|id| id.index()).collect();
             for (at, want) in [len - 1, len, len + 1].into_iter().enumerate() {
                 reached[at] |= ids.contains(&want);
             }
-            if ids.iter().any(|&id| id >= len) {
-                assert!(
-                    cove_ir::verify(program).is_err(),
-                    "seed {seed}: a name past the table verified"
-                );
-                let (_, finding) = crate::ir::ir_mutate_classified(&data);
-                assert_eq!(finding, None, "seed {seed}");
+            if !ids.iter().any(|&id| id >= len) {
+                continue;
             }
-            if reached == [true; 3] {
+            assert!(
+                cove_ir::verify(&program).is_err(),
+                "seed {seed}: a name past the table verified"
+            );
+            let (_, finding) = crate::ir::ir_mutate_classified(&data);
+            assert_eq!(finding, None, "seed {seed}");
+            if alone.is_none() && ids.contains(&len) {
+                for id in name_ids(&mut program) {
+                    if id.index() >= len {
+                        *id = StrId(0);
+                    }
+                }
+                if cove_ir::verify(&program).is_ok() {
+                    alone = Some(seed);
+                }
+            }
+            if reached == [true; 3] && alone.is_some() {
                 return;
             }
         }
-        panic!("the boundary was not reached on every side: {reached:?}");
+        panic!("not reached: each side of the end {reached:?}, a name at the end alone {alone:?}");
     }
 }
