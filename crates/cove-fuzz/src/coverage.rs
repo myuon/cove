@@ -226,8 +226,8 @@ struct Recorder {
 pub const TRIGGER_READS: u32 = 256;
 
 /// The most times one site's operands are read in one program when reading
-/// them renders a heap object ([`reads_object`]), which costs the object's
-/// length.
+/// them renders a heap object (an element load or store, a byte load, a
+/// slice, a length), which costs the object's length.
 pub const OBJECT_READS: u32 = 32;
 
 impl Debugger for Recorder {
