@@ -16,7 +16,9 @@
 //! cove-fuzz coverage <TARGET> PATH...                      replay a corpus and count which instructions its programs
 //!                                                          held and which they executed, and the boundary matrix
 //!                                                          (issue 705); TARGET also run or structured
-//! cove-fuzz coverage-defined                               every instruction key and matrix cell coverage counts against
+//! cove-fuzz coverage-each <TARGET> PATH...                 one JSON line an input: the harness's time on it and the
+//!                                                          instruction keys, states and matrix cells it reaches
+//! cove-fuzz coverage-defined                              every instruction key and matrix cell coverage counts against
 //! ```
 
 use std::path::Path;
@@ -176,6 +178,41 @@ fn main() -> ExitCode {
                 Ok(stats) => {
                     print!("{}", stats.to_json());
                     eprint!("{}", cove_fuzz::coverage::summary(&stats));
+                }
+                Err(why) => {
+                    eprintln!("{why}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        // One JSON line an input: the harness's time on it and what it
+        // reaches, for choosing a small starting corpus.
+        "coverage-each" => {
+            let Some((target, paths)) = rest.split_first() else {
+                eprintln!(
+                    "usage: cove-fuzz coverage-each <{}> FILE_OR_DIR...",
+                    cove_fuzz::coverage::TARGETS.join("|")
+                );
+                return ExitCode::from(2);
+            };
+            let paths: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
+            let quoted = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+            match cove_fuzz::coverage::each(target, &paths) {
+                Ok(all) => {
+                    for one in all {
+                        let features = one
+                            .features
+                            .iter()
+                            .map(|f| format!("\"{}\"", quoted(f)))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        println!(
+                            "{{\"file\":\"{}\",\"ms\":{:.3},\"finding\":{},\"features\":[{features}]}}",
+                            quoted(&one.file.display().to_string()),
+                            one.millis,
+                            one.finding
+                        );
+                    }
                 }
                 Err(why) => {
                     eprintln!("{why}");

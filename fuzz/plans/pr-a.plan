@@ -1,0 +1,16 @@
+# Candidate A: every target, at about one minute a target
+# (docs/FUZZ_EVALUATION.md, section 12). The same four workers, wall
+# clock and sanitizer rule as pr-b.plan.
+#
+#   <worker> <target> <weight> <sanitizer>
+wall 120
+reserve 15
+1 differential 60 none
+1 structured 60 none
+2 ir 60 none
+2 ir_mutate 60 none
+3 differential_source 60 none
+3 run 60 address
+4 image 40 address
+4 parse 40 address
+4 compile 40 address

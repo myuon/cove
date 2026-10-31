@@ -1,0 +1,52 @@
+# scripts/fuzz-pr-corpus.sh select --budget 6, 2026-10-31, at 40a70d08, Darwin x86_64
+# kind	input	replay ms	features it added	the first of them
+mandatory	fuzz/regressions/image/closure-called-with-another-signature	17.1	5	x:Alloc x:CallClosure x:FuncRef x:Int x:StoreField
+mandatory	fuzz/regressions/image/field-read-as-another-family	15.6	2	x:LoadField x:Str
+mandatory	fuzz/regressions/image/int-slot-read-through-as-a-reference	3.0	0	
+mandatory	fuzz/regressions/image/lock-on-a-closure	16.0	1	x:SharedLock
+mandatory	fuzz/regressions/image/span-delta-overflow	0.5	0	
+mandatory	fuzz/regressions/image/span-names-a-missing-file	0.4	0	
+mandatory	fuzz/regressions/image/struct-words-disagree-with-fields	0.9	0	
+mandatory	fuzz/regressions/image/verify-param-layout-out-of-range	0.5	0	
+mandatory	fuzz/regressions/image/view-forged-over-a-cell	15.6	1	x:DynRead
+mandatory	fuzz/seeds/image/boundaries	15.5	195	c:Alloc c:Arith.Int.Add c:Arith.Int.Div c:Arith.Int.Mul c:Arith.Int.Sub c:ArithImm.Add
+mandatory	fuzz/seeds/image/hello	2.3	0	
+mandatory	fuzz/seeds/image/interior-root	1.5	1	x:AddrOfField
+chosen	tests_e2e_values_float_to_int_main_cove	13.3	89	c:Arith.Float.Add c:Arith.Float.Div c:Arith.Float.Mul c:Arith.Float.Sub c:Arith.Int.Rem c:ArithImm.Rem
+chosen	tests_e2e_values_int_bits_native_main_cove	4.7	20	c:BitNot c:Shift m:int.shl.count_0 m:int.shl.negative_value m:int.shr.count_0 m:int.shr.count_63
+chosen	tests_e2e_values_boxed_generic_main_cove	5.0	19	c:CmpImm.Ge c:DynCase c:DynChild c:DynCount c:DynKind c:DynOpen
+chosen	tests_e2e_fail_equals_cycle_enum_main_cove	3.8	10	c:AddrOfSlot c:Cmp.Int.Eq c:CmpBranch.Tag.Eq t:Cmp.Int.Eq:equal tc:Cmp.Int.Eq:equal x:AddrOfPart
+chosen	tests_e2e_fail_equals_cycle_boxed_self_main_cove	4.4	6	c:DynIdentitySet c:DynSameObject c:Trap x:Box x:DynIdentitySet x:DynSameObject
+chosen	tests_e2e_values_string_bytes_main_cove	9.9	10	m:string.slice.ascii.end_len m:string.slice.ascii.from_0 m:string.slice.empty.end_len m:string.slice.empty.from_0 mc:string.slice.ascii.end_len mc:string.slice.ascii.from_0
+chosen	tests_e2e_values_float_abs_main_cove	24.2	20	c:Cmp.Float.Ge c:Cmp.Float.Gt c:Cmp.Float.Le c:FloatAbs c:FloatMinMax c:FloatSqrt
+chosen	tests_e2e_values_int_floor_div_main_cove	6.5	6	c:Cmp.Bool.Ne m:int.add.max m:int.add.min mc:int.add.max mc:int.add.min mc:int.rem.min
+chosen	tests_e2e_values_boxed_main_cove	31.7	23	c:Cmp.Bool.Order c:Cmp.Int.Order c:Cmp.Str.Eq c:Cmp.Str.Order c:CmpBranch.Bool.Eq c:CmpBranch.Str.Eq
+chosen	tests_e2e_values_range_main_cove	3.3	3	t:Cmp.Int.Le:equal x:Cmp.Bool.Eq x:Cmp.Int.Le
+chosen	tests_e2e_type_struct_copy_main_cove	4.3	3	c:AddrOfPart c:Store x:Store
+chosen	tests_e2e_tasks_cancel_main_cove	2.4	2	x:ScopeEnter x:Spawn
+chosen	tests_e2e_fail_int_overflow_main_cove	2.7	2	m:int.add.overflow t:ArithImm.Add:overflow
+chosen	tests_e2e_fail_shift_count_right_main_cove	2.7	2	m:int.shr.count_out_of_range mc:int.shr.count_out_of_range
+chosen	tests_e2e_coll_sorted_main_cove	5.1	3	c:Cmp.Str.Lt c:FuncRef x:Cmp.Str.Lt
+chosen	tests_e2e_fail_shift_count_right_logical_main_cove	2.7	2	m:int.shru.count_out_of_range mc:int.shru.count_out_of_range
+chosen	tests_e2e_fail_shift_count_left_main_cove	2.8	2	m:int.shl.count_out_of_range mc:int.shl.count_out_of_range
+chosen	tests_e2e_tasks_async_call_main_cove	2.8	2	x:Await x:Settled
+chosen	tests_e2e_fail_sort_callback_main_cove	2.9	2	m:int.div.divisor_zero mc:int.div.divisor_zero
+chosen	tests_e2e_values_int_main_cove	7.8	3	t:CmpImm.Le:equal t:CmpImm.Ne:equal x:CmpImm.Ne
+chosen	tests_e2e_values_any_equals_main_cove	18.0	5	c:Cmp.Bool.Eq c:Cmp.Tag.Eq c:Cmp.Tag.Ne x:Cmp.Tag.Eq x:Cmp.Tag.Ne
+chosen	tests_e2e_fail_int_abs_overflow_main_cove	2.6	1	m:int.neg.min
+chosen	tests_e2e_type_is_main_cove	2.7	1	x:Cmp.Identity.Eq
+chosen	tests_e2e_values_std_web_main_cove	17.1	4	c:CmpBranch.Float.Le c:CmpBranch.Str.Ne x:CmpBranch.Float.Le x:CmpBranch.Str.Ne
+chosen	tests_e2e_type_trait_main_cove	3.4	1	x:Unbox
+chosen	tests_e2e_coll_keyed_search_main_cove	20.5	4	c:Cmp.Tag.Order m:int.sub.max mc:int.sub.max x:Cmp.Tag.Order
+chosen	tests_e2e_fail_key_known_shared_main_cove	5.2	1	x:SharedUnlock
+chosen	tests_e2e_values_string_length_main_cove	5.4	1	c:RunFind
+chosen	tests_e2e_values_std_datetime_main_cove	23.9	3	c:CmpImm.Ne tc:CmpImm.Le:equal tc:CmpImm.Ne:equal
+chosen	tests_e2e_values_float_math_main_cove	21.6	2	c:CmpBranch.Float.Gt x:CmpBranch.Float.Gt
+chosen	tests_e2e_values_int_to_string_radix_main_cove	36.3	3	m:int.mul.min mc:int.mul.min x:Cmp.Str.Ne
+chosen	tests_e2e_values_float_main_cove	15.0	1	x:Arith.Float.Rem
+chosen	tests_e2e_values_string_to_upper_main_cove	33.8	2	m:string.byte_at.combining.index_0 mc:string.byte_at.combining.index_0
+chosen	tests_e2e_values_string_trim_main_cove	38.9	2	m:array.len.large mc:array.len.large
+chosen	tests_e2e_values_boxed_path_depths_main_cove	113.6	4	c:DynIdentityEnter c:DynIdentityLeave x:DynIdentityEnter x:DynIdentityLeave
+chosen	benches_trimwords_main_cove	48.0	1	x:AssertFailed
+# budget 6.0s; spent 0.64s, of which mandatory 0.09s (12 inputs); chosen 36 of 245 pool inputs
+# features: 470 covered of 470 the pool and the mandatory inputs reach; 0 left to the nightly corpus

@@ -1,0 +1,38 @@
+# scripts/fuzz-pr-corpus.sh select --budget 6, 2026-10-31, at 40a70d08, Darwin x86_64
+# kind	input	replay ms	features it added	the first of them
+mandatory	fuzz/seeds/structured/random-1024	50.2	199	c:AddrOfSlot c:Alloc c:Arith.Float.Add c:Arith.Float.Div c:Arith.Float.Mul c:Arith.Float.Sub
+mandatory	fuzz/seeds/structured/random-192	21.3	18	c:Cmp.Int.Lt c:GrowableTruncate c:RunFind c:RunSlice c:Trap m:float.cmp.nan
+mandatory	fuzz/seeds/structured/random-2048	32.1	39	c:Arith.Int.Rem c:ArithImm.Rem c:CmpBranch.Int.Eq c:CmpBranch.Int.Gt c:CmpImmBranch.Le c:CmpImmBranch.Ne
+mandatory	fuzz/seeds/structured/random-4096	23.2	3	c:BitNot m:float.to_int.out_of_range mc:float.to_int.out_of_range
+mandatory	fuzz/seeds/structured/random-512	21.6	17	c:Cmp.Int.Gt c:CmpImm.Eq m:float.arith.inf m:int.shru.count_0 m:string.slice.ascii.from_0 m:string.slice.multibyte.from_0
+mandatory	fuzz/seeds/structured/random-64	7.0	0	
+chosen	/tmp/cove-scripts/pool/corpus/structured/96ff75deb88cd649e8958e6da851f031d144f086	22.8	29	c:Cmp.Int.Eq c:CmpBranch.Int.Ne c:CmpImm.Gt c:CmpImm.Le c:CmpImm.Lt c:FloatMinMax
+chosen	/tmp/cove-scripts/pool/corpus/structured/16c2f06c676873ac639bcd4ff63e0be9e66ff2b9	14.5	11	m:float.arith.neg_zero m:string.slice.astral.end_len m:string.slice.astral.from_0 m:string.slice.combining.end_len m:string.slice.combining.from_0 mc:float.arith.neg_zero
+chosen	/tmp/cove-scripts/pool/corpus/structured/a35cd93365ab01a68b4b7b452a91404f70a8ccd7	26.6	12	c:Cmp.Float.Le c:FloatSqrt c:Not m:float.cmp.neg_zero m:float.to_int.inf m:int.shru.count_63
+chosen	/tmp/cove-scripts/pool/corpus/structured/da71ca92cf1226df1154fb72ab9fd8e22767b6fe	23.4	8	m:float.cmp.subnormal m:float.to_int.subnormal m:int.shr.negative_value mc:float.cmp.subnormal mc:float.to_int.subnormal mc:int.shr.negative_value
+chosen	/tmp/cove-scripts/pool/corpus/structured/b2ce02bec27c52f94ae090a341469013ca6c27b2	8.4	3	m:int.rem.divisor_zero mc:int.rem.divisor_zero mc:int.shru.count_0
+chosen	/tmp/cove-scripts/pool/corpus/structured/42d4a1ddf4b1c0b16c0f1bba1077c64a5feb1385	20.5	6	c:Cmp.Bool.Ne m:float.to_int.neg_zero m:int.shru.count_out_of_range mc:float.to_int.neg_zero mc:int.shru.count_out_of_range x:Cmp.Bool.Ne
+chosen	/tmp/cove-scripts/pool/corpus/structured/078dce6eff0fac5ba39552b057a481dd6d455dee	16.8	4	c:Cmp.Str.Gt c:CmpBranch.Tag.Eq x:Cmp.Str.Gt x:CmpBranch.Tag.Eq
+chosen	/tmp/cove-scripts/pool/corpus/structured/c6b70028c2e87eddf7d32d7a008d325959260306	14.5	3	c:CmpBranch.Str.Le m:float.math.subnormal x:CmpBranch.Str.Le
+chosen	/tmp/cove-scripts/pool/corpus/structured/12143eccc69a407ee7312ec233f46c8fafb1018e	20.3	4	m:string.byte_at.empty.index_0 m:string.byte_at.empty.index_len mc:string.byte_at.empty.index_0 mc:string.byte_at.empty.index_len
+chosen	/tmp/cove-scripts/pool/corpus/structured/9d26977af63cea4e7ee238b335a8a7144323e640	34.4	6	c:Cmp.Str.Eq c:CmpImm.Ne t:CmpImm.Gt:equal tc:CmpImm.Gt:equal x:Cmp.Str.Eq x:Cmp.Str.Ne
+chosen	/tmp/cove-scripts/pool/corpus/structured/c9b4eb8fdc6a8742da23de8c0b62493d7fc0aadd	17.5	3	m:int.sub.max mc:int.sub.max x:Arith.Float.Rem
+chosen	/tmp/cove-scripts/pool/corpus/structured/b96e92d8e75333ba6f28b71c0236eee8cbee571f	20.1	3	m:int.shl.count_out_of_range t:Cmp.Int.Ge:equal x:Cmp.Int.Ge
+chosen	/tmp/cove-scripts/pool/corpus/structured/daa1a53a8a945fb02f0565e6b20db6af7ce3c246	24.2	3	m:int.shl.count_63 m:int.shl.negative_value x:CmpBranch.Str.Lt
+chosen	/tmp/cove-scripts/pool/corpus/structured/15f88db439b32dab72c1a4f7d82d167c37a376e2	27.5	3	c:CmpBranch.Bool.Eq m:int.shru.negative_value x:CmpBranch.Bool.Eq
+chosen	/tmp/cove-scripts/pool/corpus/structured/d905e2d3beb21d99bd6c463c128f537325b21156	17.8	2	m:int.shr.count_0 mc:int.shr.count_0
+chosen	/tmp/cove-scripts/pool/corpus/structured/af73d4f457ef8379a79028aee3e7037712008fe0	19.0	2	m:string.byte_at.combining.index_past m:string.byte_at.multibyte.index_past
+chosen	/tmp/cove-scripts/pool/corpus/structured/82787c91e3f515433293c2c2d70c81d8cb0d31c6	21.5	2	c:Cmp.Float.Gt x:Cmp.Float.Gt
+chosen	/tmp/cove-scripts/pool/corpus/structured/d0b7f5e713ee3b9a73450650e8f334d91663d1e1	21.8	2	c:Cmp.Str.Lt x:Cmp.Str.Lt
+chosen	/tmp/cove-scripts/pool/corpus/structured/f9f4dedb9db2f72fca56a3803c623aed8fe74d3f	24.1	2	m:int.shr.count_out_of_range mc:int.shr.count_out_of_range
+chosen	/tmp/cove-scripts/pool/corpus/structured/ef0cac3234e8905cda4e8abaa7c3e13e7e4bf651	28.7	2	m:float.math.neg_zero mc:float.math.neg_zero
+chosen	/tmp/cove-scripts/pool/corpus/structured/631b4de84c454b0ff2c60d3bce964e268c46ce8d	17.1	1	x:CmpBranch.Str.Eq
+chosen	/tmp/cove-scripts/pool/corpus/structured/d5f8bc0310009aa000ac1b1226757e36e185a0c8	22.2	1	c:Cmp.Int.Ge
+chosen	/tmp/cove-scripts/pool/corpus/structured/7913400991c640a4e031560bbca84269796f652a	22.5	1	m:int.neg.min
+chosen	/tmp/cove-scripts/pool/corpus/structured/05f549ca14bfb145acc2f82e77a2ed4ef38ada0b	24.6	1	x:Cmp.Int.Ne
+chosen	/tmp/cove-scripts/pool/corpus/structured/ac8826586c805dc65463e1e7b078fc7c06f0c331	24.6	1	x:Cmp.Float.Ne
+chosen	/tmp/cove-scripts/pool/corpus/structured/b3542a95f441d37e4ea5e0305c4aaa775d64d5e8	25.8	1	x:CmpBranch.Str.Gt
+chosen	/tmp/cove-scripts/pool/corpus/structured/38df224ec707b566a9a34f0fe200457000763c78	29.6	1	mc:float.math.subnormal
+chosen	/tmp/cove-scripts/pool/corpus/structured/4d406709b0e199048da47b7b802e85fd80e43362	36.3	1	m:string.byte_at.astral.index_past
+# budget 6.0s; spent 0.78s, of which mandatory 0.16s (6 inputs); chosen 28 of 546 pool inputs
+# features: 394 covered of 394 the pool and the mandatory inputs reach; 0 left to the nightly corpus
