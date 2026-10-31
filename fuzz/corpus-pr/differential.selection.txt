@@ -1,0 +1,43 @@
+# scripts/fuzz-pr-corpus.sh select --budget 6, 2026-10-31, at 40a70d08, Darwin x86_64
+# kind	input	replay ms	features it added	the first of them
+mandatory	fuzz/regressions/differential/generator-byte-range-nests-too-deep	61.0	235	c:Alloc c:Arith.Float.Div c:Arith.Int.Add c:Arith.Int.Div c:Arith.Int.Mul c:Arith.Int.Rem
+mandatory	fuzz/regressions/differential/generator-vector-chain-nests-too-deep	32.8	19	c:Arith.Float.Mul c:CmpImm.Eq m:float.arith.subnormal m:float.cmp.neg_zero m:float.cmp.subnormal m:float.to_int.subnormal
+mandatory	fuzz/seeds/differential/complete-13	20.6	23	c:Arith.Float.Add c:Cmp.Float.Eq c:CmpBranch.Float.Gt c:Convert c:FloatAbs m:float.arith.inf
+mandatory	fuzz/seeds/differential/complete-21	28.2	17	c:AddrOfSlot c:Arith.Float.Sub c:Cmp.Bool.Ne c:CmpImm.Lt c:Load c:Not
+mandatory	fuzz/seeds/differential/complete-5	47.5	9	c:CmpImm.Gt m:float.arith.nan m:float.math.subnormal m:int.shr.negative_value mc:float.math.subnormal mc:int.shr.negative_value
+mandatory	fuzz/seeds/differential/random-1024	39.2	6	c:CmpBranch.Float.Le m:float.from_int.inexact m:int.shl.count_0 mc:int.shl.count_0 x:CmpBranch.Float.Le x:CmpImm.Ne
+mandatory	fuzz/seeds/differential/random-192	29.8	6	c:Cmp.Int.Lt c:GrowableTruncate c:Trap m:float.math.nan mc:float.math.nan x:Trap
+mandatory	fuzz/seeds/differential/random-2048	41.5	8	m:int.add.max m:int.add.overflow m:string.byte_at.combining.index_0 mc:int.add.max mc:int.add.overflow mc:string.byte_at.combining.index_0
+mandatory	fuzz/seeds/differential/random-4096	30.9	0	
+mandatory	fuzz/seeds/differential/random-512	28.6	1	m:int.shru.count_0
+mandatory	fuzz/seeds/differential/random-64	8.9	0	
+chosen	/tmp/cove-scripts/pool/corpus/differential/b081417c527faff5ecd64f10041788c680af68d8	17.6	8	c:Cmp.Float.Le c:FloatRound c:FloatSqrt m:float.arith.neg_zero mc:float.arith.neg_zero x:Cmp.Float.Le
+chosen	/tmp/cove-scripts/pool/corpus/differential/12d0a2b14a61ba09859f6d48a52bd13b78407354	12.6	5	c:CmpBranch.Bool.Eq m:int.shru.negative_value mc:int.shru.count_0 mc:int.shru.negative_value x:CmpBranch.Bool.Eq
+chosen	/tmp/cove-scripts/pool/corpus/differential/bed450030ee079672346259294857e13f723252b	9.8	4	m:string.slice.astral.end_len m:string.slice.astral.from_0 mc:string.slice.astral.end_len mc:string.slice.astral.from_0
+chosen	/tmp/cove-scripts/pool/corpus/differential/1722d4b53a2a205753c9e9704f9bc8a7ceac8d54	32.7	11	c:Cmp.Int.Eq c:CmpBranch.Int.Ne c:CmpImm.Le m:int.shru.count_out_of_range mc:int.shru.count_out_of_range t:Cmp.Int.Eq:equal
+chosen	/tmp/cove-scripts/pool/corpus/differential/ebcda6e9058f2f029a71db3baf965d264a01c452	19.4	5	m:string.byte_at.empty.index_0 m:string.byte_at.empty.index_len mc:float.from_int.inexact mc:string.byte_at.empty.index_0 mc:string.byte_at.empty.index_len
+chosen	/tmp/cove-scripts/pool/corpus/differential/6a1222efeb022a731fe4415c628ada0ed18e538b	16.7	4	c:CmpBranch.Tag.Eq m:string.byte_at.multibyte.index_past mc:string.byte_at.multibyte.index_past x:CmpBranch.Tag.Eq
+chosen	/tmp/cove-scripts/pool/corpus/differential/5564b905389fcb2c2b6b8761232e4c15b1beb0de	16.6	3	t:Cmp.Int.Lt:equal t:Cmp.Int.Ne:equal tc:Cmp.Int.Lt:equal
+chosen	/tmp/cove-scripts/pool/corpus/differential/ecfe20637444b271e8f8d62f62735cf02a0ff00f	22.8	4	c:Cmp.Int.Ge t:Cmp.Int.Ge:equal tc:Cmp.Int.Ge:equal x:Cmp.Int.Ge
+chosen	/tmp/cove-scripts/pool/corpus/differential/9862e6f5d99e37920a86bbce0c363b5a4975a90b	18.5	3	c:Cmp.Str.Lt m:int.rem.min x:Cmp.Str.Lt
+chosen	/tmp/cove-scripts/pool/corpus/differential/023598f86bedc4f61d141937116dd8752de4b6f3	18.6	3	m:int.shru.count_63 mc:int.shru.count_63 x:Arith.Float.Rem
+chosen	/tmp/cove-scripts/pool/corpus/differential/c657b4aceeeff2b61ea57f9bc4054b229646c0cf	21.9	3	m:int.mul.max m:int.mul.overflow t:ArithImm.Mul:overflow
+chosen	/tmp/cove-scripts/pool/corpus/differential/b5644b7cd42d155cb33a4d983da005484a062cec	30.3	4	c:Cmp.Int.Le c:CmpImm.Ne m:int.rem.divisor_zero x:Cmp.Int.Le
+chosen	/tmp/cove-scripts/pool/corpus/differential/70692bc83c0e200eeb27be79ecb242ab21b36fed	47.9	6	c:FloatMinMax m:float.math.neg_zero m:float.to_int.neg_zero mc:float.math.neg_zero mc:float.to_int.neg_zero x:Cmp.Float.Ge
+chosen	/tmp/cove-scripts/pool/corpus/differential/4e8230972b77a79a1a973b3fea24c23c11724ae1	9.7	1	m:int.shr.count_63
+chosen	/tmp/cove-scripts/pool/corpus/differential/0b9045c3ab922938809a4d355c24fdb5ec8e8716	22.5	2	t:CmpImm.Lt:equal tc:CmpImm.Lt:equal
+chosen	/tmp/cove-scripts/pool/corpus/differential/ed955ad641c68e8d860616207b0525cc40fdb70e	35.3	3	m:int.shl.count_63 mc:int.rem.divisor_zero mc:int.shl.count_63
+chosen	/tmp/cove-scripts/pool/corpus/differential/aa038fcf060d6f80d3b843cdf8c813d8e33631ee	10.8	1	mc:int.shr.count_out_of_range
+chosen	/tmp/cove-scripts/pool/corpus/differential/26ce36c9d795f25551c7a434443d0706b9123aca	11.6	1	m:string.byte_at.empty.index_past
+chosen	/tmp/cove-scripts/pool/corpus/differential/c8571b0ba23f7d60bfd8f8e38ea0f9639b83b46d	27.0	2	m:int.sub.max mc:int.sub.max
+chosen	/tmp/cove-scripts/pool/corpus/differential/50aec4389d08b06bcdd656218fe50a3d45b70a4a	41.6	3	c:Cmp.Str.Ge m:string.byte_at.multibyte.index_len x:Cmp.Str.Ge
+chosen	/tmp/cove-scripts/pool/corpus/differential/520cf05e7de42f9f5d148afa9da838b8c55847e7	30.3	2	c:CmpBranch.Str.Le x:CmpBranch.Str.Le
+chosen	/tmp/cove-scripts/pool/corpus/differential/e1ef0cb746321485c82bba7cd6c4b582eca26798	16.8	1	m:string.byte_at.ascii.index_past
+chosen	/tmp/cove-scripts/pool/corpus/differential/c439d3d2d7975bab801a726708238bd4f4177c24	39.1	2	mc:float.arith.nan mc:int.shr.count_0
+chosen	/tmp/cove-scripts/pool/corpus/differential/1edcb67d33b4465e7e831994b5ef41596e08d7e7	24.7	1	m:int.mul.min
+chosen	/tmp/cove-scripts/pool/corpus/differential/ce3bb14be223b8e88a2a6a2f7621ff0510c5a4fb	30.0	1	m:string.byte_at.ascii.index_len
+chosen	/tmp/cove-scripts/pool/corpus/differential/ee6b34013fafba88bbc3d8abfd4185082fec76a1	33.5	1	t:Arith.Int.Mul:overflow
+chosen	/tmp/cove-scripts/pool/corpus/differential/570f29b9bf4c87f3c3c8f2561d85343ca6a1354b	36.3	1	x:Cmp.Str.Eq
+chosen	/tmp/cove-scripts/pool/corpus/differential/c74a93aff8bf685326bcd4a0f5305ce7fb075cea	75.8	2	m:int.add.min mc:int.add.min
+# budget 6.0s; spent 1.10s, of which mandatory 0.37s (11 inputs); chosen 28 of 676 pool inputs
+# features: 411 covered of 411 the pool and the mandatory inputs reach; 0 left to the nightly corpus

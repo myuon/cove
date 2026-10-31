@@ -814,6 +814,94 @@ pub fn replay(target: &str, paths: &[PathBuf]) -> Result<Stats, String> {
     Ok(stats)
 }
 
+/// What [`each`] says of one input: how long the target's own harness took
+/// on it, and the features it reaches.
+pub struct Each {
+    pub file: PathBuf,
+    /// The harness's run of the input, as libFuzzer would make it.
+    pub millis: f64,
+    /// Whether that run was a finding (a panic or a disagreement).
+    pub finding: bool,
+    /// `x:` and `c:` an instruction key executed anywhere / in compiled code,
+    /// `t:` and `tc:` a trigger state, `m:` and `mc:` a matrix cell, and for
+    /// the targets that count comparisons `s:` a kind of program — a full
+    /// comparison of successes with native code, a collection under a
+    /// compiled frame.
+    pub features: BTreeSet<String>,
+}
+
+/// Every input under `paths`, one at a time: what [`Each`] says. The
+/// selection of a small starting corpus is made from these
+/// (`scripts/fuzz-pr-corpus.sh`), by what an input reaches for the time
+/// its replay costs.
+///
+/// # Errors
+///
+/// If `target` is not one of [`TARGETS`], or a path cannot be read.
+pub fn each(target: &str, paths: &[PathBuf]) -> Result<Vec<Each>, String> {
+    if !TARGETS.contains(&target) {
+        return Err(format!(
+            "no coverage for `{target}`: {}",
+            TARGETS.join(", ")
+        ));
+    }
+    let harness = crate::harness(target).ok_or_else(|| format!("no target `{target}`"))?;
+    let counted = crate::stats::TARGETS.contains(&target);
+    let files = crate::stats::files_under(paths)?;
+    let mut out = Vec::new();
+    for file in files {
+        let bytes = std::fs::read(&file).map_err(|why| format!("{}: {why}", file.display()))?;
+        let mut features = BTreeSet::new();
+        let started = std::time::Instant::now();
+        let finding = if counted {
+            let replay = crate::stats::replay(target, std::slice::from_ref(&file))?;
+            for (flag, path) in [
+                ("full_success_with_native", ["comparisons", "full_success_with_native"]),
+                ("gc_while_compiled", ["programs", "gc_while_compiled"]),
+                ("native_ran", ["programs", "native_ran"]),
+            ] {
+                if replay.stats.get(&path) > 0 {
+                    features.insert(format!("s:{flag}"));
+                }
+            }
+            !replay.findings.is_empty()
+        } else {
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let bytes = bytes.clone();
+            let failed = std::panic::catch_unwind(move || harness(&bytes)).is_err();
+            std::panic::set_hook(hook);
+            failed
+        };
+        let millis = started.elapsed().as_secs_f64() * 1000.0;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let target = target.to_string();
+        let measured =
+            std::panic::catch_unwind(move || on_stack(move || subject(&target, &bytes).map(measure)));
+        std::panic::set_hook(hook);
+        if let Ok(Some(Some(m))) = measured {
+            for (set, tag) in [
+                (&m.executed, "x"),
+                (&m.executed_compiled, "c"),
+                (&m.triggered, "t"),
+                (&m.triggered_compiled, "tc"),
+                (&m.cells, "m"),
+                (&m.cells_compiled, "mc"),
+            ] {
+                features.extend(set.iter().map(|k| format!("{tag}:{k}")));
+            }
+        }
+        out.push(Each {
+            file,
+            millis,
+            finding,
+            features,
+        });
+    }
+    Ok(out)
+}
+
 /// The counts [`replay`] made, as a table a person reads: one row a key,
 /// ordered by how many programs held it, with the keys present and never
 /// executed listed last.

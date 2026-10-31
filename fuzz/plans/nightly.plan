@@ -1,0 +1,14 @@
+# The nightly run (docs/FUZZING.md, "In CI"): four workers for fifteen
+# minutes, growing the corpus the next night starts from. The initial
+# candidate of issue 681's budget plan; docs/FUZZ_EVALUATION.md, section 12,
+# says what it was chosen over and what is not known about it.
+#
+#   <worker> <target> <weight> <sanitizer>
+wall 900
+reserve 60
+1 ir 900 none
+2 ir 900 none
+3 differential 900 none
+4 image 300 address
+4 ir_mutate 300 none
+4 differential_source 300 none

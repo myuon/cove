@@ -1,0 +1,8 @@
+# Grows a pool to choose the PR corpus from (scripts/fuzz-pr-corpus.sh select
+# --pool), standing in for the nightly corpus where there is none.
+wall 180
+reserve 10
+1 ir 1 none
+2 differential 1 none
+3 structured 1 none
+4 ir 1 none

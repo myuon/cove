@@ -1,0 +1,58 @@
+# scripts/fuzz-pr-corpus.sh select --budget 6, 2026-10-31, at 40a70d08, Darwin x86_64
+# kind	input	replay ms	features it added	the first of them
+mandatory	fuzz/regressions/differential_source/erased-operands	29.1	0	
+mandatory	fuzz/regressions/differential_source/free-function-with-self	0.2	0	
+mandatory	fuzz/regressions/differential_source/operands-that-leave	9.6	88	c:Arith.Int.Add c:Arith.Int.Div c:Arith.Int.Mul c:Arith.Int.Sub c:ArithImm.Add c:ArithImm.Div
+mandatory	fuzz/regressions/differential_source/operators-on-any	10.0	12	c:Bool c:BranchFalse c:Len c:RunCopy c:Str x:Alloc
+mandatory	fuzz/seeds/differential_source/boundaries	26.0	105	c:Alloc c:Bits c:CallClosure c:Cmp.Int.Gt c:Cmp.Int.Lt c:CmpBranch.Int.Eq
+mandatory	fuzz/seeds/differential_source/gc-root-callee-holds	19.8	1	s:gc_while_compiled
+mandatory	fuzz/seeds/differential_source/gc-root-closure	22.0	1	c:FuncRef
+mandatory	fuzz/seeds/differential_source/gc-root-closure-closure	20.0	0	
+mandatory	fuzz/seeds/differential_source/gc-root-enum	20.3	0	
+mandatory	fuzz/seeds/differential_source/gc-root-frames	20.1	0	
+mandatory	fuzz/seeds/differential_source/gc-root-map	21.0	2	c:Cmp.Str.Order x:Cmp.Str.Order
+mandatory	fuzz/seeds/differential_source/gc-root-option	23.7	0	
+mandatory	fuzz/seeds/differential_source/gc-root-recursion	20.1	0	
+mandatory	fuzz/seeds/differential_source/gc-root-string	19.1	0	
+mandatory	fuzz/seeds/differential_source/gc-root-string-callee	19.8	0	
+mandatory	fuzz/seeds/differential_source/gc-root-struct	21.5	0	
+mandatory	fuzz/seeds/differential_source/gc-root-vector	20.6	0	
+mandatory	fuzz/seeds/differential_source/types-floats-closures	31.6	85	c:Arith.Float.Add c:Arith.Float.Div c:Arith.Float.Mul c:Arith.Float.Sub c:Arith.Int.Rem c:ArithImm.Rem
+chosen	tests/e2e/values_boxed_generic/main.cove	14.0	19	c:CallHost c:CmpImm.Ge c:DynCase c:DynChild c:DynCount c:DynKind
+chosen	tests/e2e/values_int_bits_native/main.cove	12.7	17	c:BitNot m:int.shl.negative_value m:int.shr.count_0 m:int.shr.count_63 m:int.shr.negative_value m:int.shru.count_0
+chosen	tests/e2e/fail_equals_cycle_enum/main.cove	9.3	10	c:AddrOfSlot c:Cmp.Int.Eq c:CmpBranch.Tag.Eq t:Cmp.Int.Eq:equal tc:Cmp.Int.Eq:equal x:AddrOfPart
+chosen	tests/e2e/values_float_abs/main.cove	38.5	23	c:Cmp.Float.Eq c:Cmp.Float.Ge c:Cmp.Float.Gt c:Cmp.Float.Le c:FloatMinMax c:FloatSqrt
+chosen	tests/e2e/values_boxed_render/main.cove	38.0	18	c:Cmp.Int.Order c:Cmp.Str.Eq c:DynCaseName c:DynFieldName c:DynIdentitySet c:DynOnPath
+chosen	tests/e2e/values_string_bytes/main.cove	21.6	10	m:string.slice.ascii.end_len m:string.slice.ascii.from_0 m:string.slice.empty.end_len m:string.slice.empty.from_0 mc:string.slice.ascii.end_len mc:string.slice.ascii.from_0
+chosen	tests/e2e/fail_key_known_shared/main.cove	12.3	6	c:Store c:Trap x:AddrOfField x:SharedLock x:SharedUnlock x:Store
+chosen	tests/e2e/values_int_floor_div/main.cove	17.8	6	c:Cmp.Bool.Ne m:int.add.max m:int.add.min mc:int.add.max mc:int.add.min mc:int.rem.min
+chosen	tests/e2e/type_match/main.cove	8.9	3	c:CmpBranch.Str.Eq x:CmpBranch.Bool.Eq x:CmpBranch.Str.Eq
+chosen	tests/e2e/values_range/main.cove	9.3	3	t:Cmp.Int.Le:equal x:Cmp.Bool.Eq x:Cmp.Int.Le
+chosen	tests/e2e/tasks_host_order/main.cove	7.6	2	x:ScopeEnter x:Spawn
+chosen	tests/e2e/fail_shift_count_right_logical/main.cove	8.0	2	m:int.shru.count_out_of_range mc:int.shru.count_out_of_range
+chosen	tests/e2e/fail_shift_count_right/main.cove	8.1	2	m:int.shr.count_out_of_range mc:int.shr.count_out_of_range
+chosen	tests/e2e/fail_int_overflow/main.cove	8.2	2	m:int.add.overflow t:ArithImm.Add:overflow
+chosen	tests/e2e/fail_shift_count_left/main.cove	8.4	2	m:int.shl.count_out_of_range mc:int.shl.count_out_of_range
+chosen	tests/e2e/fail_sort_callback/main.cove	8.6	2	m:int.div.divisor_zero mc:int.div.divisor_zero
+chosen	tests/e2e/coll_sorted/main.cove	11.8	2	c:Cmp.Str.Lt x:Cmp.Str.Lt
+chosen	tests/e2e/tasks_async_call/main.cove	11.8	2	x:Await x:Settled
+chosen	tests/e2e/values_float_to_int/main.cove	25.7	4	m:float.from_int.inexact m:float.to_int.subnormal mc:float.from_int.inexact mc:float.to_int.subnormal
+chosen	tests/e2e/values_int/main.cove	21.2	3	t:CmpImm.Le:equal t:CmpImm.Ne:equal x:CmpImm.Ne
+chosen	tests/e2e/values_any_equals/main.cove	37.3	5	c:Cmp.Bool.Eq c:Cmp.Tag.Eq c:Cmp.Tag.Ne x:Cmp.Tag.Eq x:Cmp.Tag.Ne
+chosen	tests/e2e/coll_keyed_search/main.cove	49.5	6	c:Cmp.Bool.Order c:Cmp.Tag.Order m:int.sub.max mc:int.sub.max x:Cmp.Bool.Order x:Cmp.Tag.Order
+chosen	tests/e2e/values_std_web/main.cove	37.3	4	c:CmpBranch.Float.Le c:CmpBranch.Str.Ne x:CmpBranch.Float.Le x:CmpBranch.Str.Ne
+chosen	tests/e2e/fail_int_abs_overflow/main.cove	8.2	1	m:int.neg.min
+chosen	tests/e2e/type_is/main.cove	8.4	1	x:Cmp.Identity.Eq
+chosen	tests/e2e/type_struct_copy/main.cove	10.0	1	c:AddrOfPart
+chosen	tests/e2e/values_string_length/main.cove	12.0	1	c:RunFind
+chosen	tests/e2e/values_boxed/main.cove	59.3	3	c:CmpBranch.Bool.Eq c:DynNameOrder x:DynNameOrder
+chosen	tests/e2e/values_string_from_code_point/main.cove	20.2	1	tc:CmpImm.Le:equal
+chosen	tests/e2e/values_float/main.cove	26.4	1	x:Arith.Float.Rem
+chosen	tests/e2e/values_std_datetime/main.cove	89.2	2	c:CmpImm.Ne tc:CmpImm.Ne:equal
+chosen	tests/e2e/values_string_to_upper/main.cove	115.5	2	m:string.byte_at.combining.index_0 mc:string.byte_at.combining.index_0
+chosen	tests/e2e/values_int_to_string_radix/main.cove	187.5	3	m:int.mul.min mc:int.mul.min x:Cmp.Str.Ne
+chosen	tests/e2e/values_boxed_path_depths/main.cove	260.6	4	c:DynIdentityEnter c:DynIdentityLeave x:DynIdentityEnter x:DynIdentityLeave
+chosen	tests/e2e/values_string_trim/main.cove	188.2	2	m:array.len.large mc:array.len.large
+chosen	benches/trimwords/main.cove	194.7	1	x:AssertFailed
+# budget 6.0s; spent 1.96s, of which mandatory 0.35s (18 inputs); chosen 36 of 410 pool inputs
+# features: 470 covered of 470 the pool and the mandatory inputs reach; 0 left to the nightly corpus

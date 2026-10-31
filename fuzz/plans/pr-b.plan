@@ -1,0 +1,19 @@
+# Candidate B: the targets that found the most artificial defects, in depth
+# (docs/FUZZ_EVALUATION.md, sections 10 and 12). Four workers, two minutes of
+# wall clock from the first corpus copy to the summary.
+#
+#   <worker> <target> <weight> <sanitizer>
+#
+# A weight is a share of the worker's time, not seconds: the runner fits
+# each worker's lines into `wall - reserve`, starting-corpus replay included.
+# `none` for the targets that compare modes (a disagreement is not a
+# memory-safety question, and the build is several times faster);
+# AddressSanitizer for the ones that read untrusted bytes.
+wall 120
+reserve 15
+1 ir 120 none
+2 ir 120 none
+3 differential 120 none
+4 image 60 address
+4 parse 30 address
+4 compile 30 address

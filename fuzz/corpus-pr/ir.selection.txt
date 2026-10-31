@@ -1,0 +1,103 @@
+# scripts/fuzz-pr-corpus.sh select --budget 6, 2026-10-31, at 40a70d08, Darwin x86_64
+# kind	input	replay ms	features it added	the first of them
+mandatory	fuzz/regressions/ir/await-at-another-width	1.0	6	x:Await x:CmpImmBranch.Eq x:GrowableAlloc x:Int x:Settled x:Str
+mandatory	fuzz/regressions/ir/lock-on-an-object-then-a-forged-view	0.5	2	x:Cmp.Str.Ne x:SharedLock
+mandatory	fuzz/regressions/ir/place-offset-round-a-loop	4.0	0	
+mandatory	fuzz/seeds/ir/compiled-13	0.9	14	c:Alloc c:Arith.Int.Div c:CmpImm.Ne c:GrowableAlloc c:Int m:int.div.divisor_zero
+mandatory	fuzz/seeds/ir/compiled-21	0.4	33	c:FloatAbs c:FloatRound c:FloatSqrt c:FloatTruncate c:Jump c:Return
+mandatory	fuzz/seeds/ir/compiled-55	0.8	26	c:AddrOfSlot c:ArithImm.Add c:ArithImm.Rem c:BitNot c:CmpImm.Lt c:CmpImmBranch.Ne
+mandatory	fuzz/seeds/ir/seed-2048	0.2	0	
+mandatory	fuzz/seeds/ir/seed-512	0.6	0	
+mandatory	fuzz/seeds/ir/seed-64	0.8	1	x:RunFind
+chosen	/tmp/cove-scripts/pool/corpus/ir/a5dbcaea461560ed873d74872452b4683b629ac6	0.9	51	c:AddrOfPart c:Arith.Float.Add c:ArithImm.Div c:ArithImm.Mul c:ArithImm.Sub c:Bool
+chosen	/tmp/cove-scripts/pool/corpus/ir/e89e58b8a28834098da08de722a7fb340862de18	1.1	26	c:Arith.Int.Add c:Clear c:Cmp.Str.Gt c:CmpBranch.Bool.Eq c:CmpBranch.Float.Ne c:CmpBranch.Tag.Eq
+chosen	/tmp/cove-scripts/pool/corpus/ir/74f2de27d6f13ff6880a0894842e0f22070013d9	1.1	23	c:Cmp.Bool.Eq c:Cmp.Float.Ne c:Cmp.Int.Eq c:Convert c:Load c:LoadElem
+chosen	/tmp/cove-scripts/pool/corpus/ir/6fd5f2c3429f4fd0fbfd6b5596def4cb28d75159	1.1	19	c:Arith.Float.Mul c:Cmp.Float.Gt c:Cmp.Float.Le c:Cmp.Int.Ge c:Cmp.Str.Ge c:Cmp.Str.Lt
+chosen	/tmp/cove-scripts/pool/corpus/ir/099b88014ea005e5da28a22763e7305363ff2bdf	0.8	14	c:Arith.Int.Sub c:Bits c:Call c:Cmp.Int.Ne c:CmpImmBranch.Ge m:int.sub.min
+chosen	/tmp/cove-scripts/pool/corpus/ir/dcbf24d72b942030a13744f5e1cf613886208858	1.4	12	c:Arith.Int.Mul c:Cmp.Int.Gt c:CmpBranch.Str.Ne c:StoreElem m:array.store.index_len mc:array.store.index_0
+chosen	/tmp/cove-scripts/pool/corpus/ir/b68b73090911cee3c910a476734e304cf9f5c6fc	1.7	13	c:CmpImm.Eq c:CmpImm.Le c:CmpImmBranch.Le m:float.math.inf m:int.shl.count_0 mc:float.math.inf
+chosen	/tmp/cove-scripts/pool/corpus/ir/756d3b307b15d2d94b13d102dc3cd2c762b09d8c	0.6	8	x:DynIdentityEnter x:DynIdentitySet x:DynOnPath x:DynSameObject x:DynSameType x:GrowableCommit
+chosen	/tmp/cove-scripts/pool/corpus/ir/428f97004c77e629bab904b7ebcac147a5fe269e	1.0	9	c:CmpImmBranch.Eq m:float.to_int.out_of_range m:string.byte_at.empty.index_0 m:string.byte_at.empty.index_len mc:float.to_int.out_of_range mc:string.byte_at.empty.index_0
+chosen	/tmp/cove-scripts/pool/corpus/ir/87dd64336f1575ba748f8d654600bd5494d7bc76	1.1	9	c:Arith.Float.Sub c:CmpImm.Ge c:CmpImm.Gt m:int.shr.count_out_of_range m:int.shr.negative_value mc:int.shr.count_out_of_range
+chosen	/tmp/cove-scripts/pool/corpus/ir/7c5f7632b8c1b96d8391eee2bf00398464f2f84a	0.9	8	c:Arith.Float.Div m:array.len.one m:float.to_int.nan m:int.rem.min mc:float.arith.nan mc:float.to_int.nan
+chosen	/tmp/cove-scripts/pool/corpus/ir/e415940ca94c7a89b2db1e7bbefecf5081e007ca	1.1	8	c:Arith.Int.Rem c:Cmp.Str.Eq m:float.math.subnormal m:int.rem.divisor_zero mc:float.math.subnormal mc:int.rem.divisor_zero
+chosen	/tmp/cove-scripts/pool/corpus/ir/6cf423de1e55f881646ce1685181147bd30d2698	1.2	8	c:Cmp.Float.Eq c:Cmp.Float.Lt m:float.arith.neg_zero m:string.byte_at.ascii.index_0 mc:float.arith.neg_zero mc:string.byte_at.ascii.index_0
+chosen	/tmp/cove-scripts/pool/corpus/ir/a78af60115986cdaaeeaeb36fcb6c3ba86baaa03	0.8	7	c:Cmp.Int.Lt m:int.sub.unit mc:array.store.last mc:int.sub.unit t:Cmp.Int.Lt:equal tc:Cmp.Int.Lt:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/84befa6c1a218733f668bb3faf5914b413f4ba3d	1.4	8	c:CmpBranch.Int.Ge c:CmpBranch.Int.Lt t:CmpBranch.Int.Ge:equal t:CmpBranch.Int.Lt:equal tc:CmpBranch.Int.Ge:equal tc:CmpBranch.Int.Lt:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/e5d28c62fe3fe4c7ebf4d9ebb2365b65629f0d22	1.5	7	c:Cmp.Int.Le c:Cmp.Str.Ne c:StoreField t:Cmp.Int.Le:equal tc:Cmp.Int.Le:equal x:Cmp.Int.Le
+chosen	/tmp/cove-scripts/pool/corpus/ir/0f3b9481e3de10e8185e1a9238ee77a8067b6df2	1.1	6	m:int.mul.overflow m:int.mul.unit mc:int.mul.overflow mc:int.mul.unit t:ArithImm.Mul:overflow tc:ArithImm.Mul:overflow
+chosen	/tmp/cove-scripts/pool/corpus/ir/50ea3dc080dbf08c1b894c025bc7dbe638ff8c64	0.8	5	m:string.slice.ascii.from_0 m:string.slice.empty.end_len m:string.slice.empty.from_0 x:DynTypeName x:RunSlice
+chosen	/tmp/cove-scripts/pool/corpus/ir/60ce26c4ca0f5a7b35e417011b037ada9394d8ac	0.5	4	c:Cmp.Int.Order c:CmpBranch.Float.Le x:Cmp.Int.Order x:CmpBranch.Float.Le
+chosen	/tmp/cove-scripts/pool/corpus/ir/6676766b08ac89bb6c7d5227f8456af936663ebd	2.0	6	c:CmpBranch.Str.Eq c:CmpBranch.Str.Le m:float.to_int.neg_zero mc:float.to_int.neg_zero x:CmpBranch.Str.Eq x:CmpBranch.Str.Le
+chosen	/tmp/cove-scripts/pool/corpus/ir/2973564ece3d8fc491e95d89d7316f5b6442822d	0.8	4	m:string.byte_at.astral.index_0 x:Cmp.Bool.Le x:ScopeEnter x:ScopeLeave
+chosen	/tmp/cove-scripts/pool/corpus/ir/da8b2213211fbe4b33cf5d4608a017cb3fca1080	0.8	4	m:int.add.overflow mc:int.add.overflow t:ArithImm.Add:overflow tc:ArithImm.Add:overflow
+chosen	/tmp/cove-scripts/pool/corpus/ir/c48a50f1bcb6d0e0562c9fe3f66168ebbe4e1e71	0.9	4	m:string.byte_at.astral.index_past m:string.byte_at.multibyte.index_past mc:string.byte_at.astral.index_past mc:string.byte_at.multibyte.index_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/aadea08750256163f5d2c89f94422b7e2ec3de33	1.0	4	m:int.shl.count_out_of_range mc:array.len.one mc:int.shl.count_out_of_range mc:int.shl.negative_value
+chosen	/tmp/cove-scripts/pool/corpus/ir/876514ee0ca46a8e827a6a62e0b918b594d3b73c	1.0	4	m:int.shru.count_out_of_range m:int.shru.negative_value mc:int.shru.count_out_of_range mc:int.shru.negative_value
+chosen	/tmp/cove-scripts/pool/corpus/ir/db2f141ed62e477df3f6c2d55f58d56555c602f3	1.1	4	m:array.load.past mc:array.load.past t:CmpImmBranch.Ne:equal tc:CmpImmBranch.Ne:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/93878a70bc76d46540a77415e58de70bfb97acab	1.1	4	c:Cmp.Str.Order m:array.load.last mc:array.load.last x:Cmp.Str.Order
+chosen	/tmp/cove-scripts/pool/corpus/ir/c650b55d8573ff0aa7c52f1e07dc2fc54b030cf0	0.5	3	x:AssertFailed x:Box x:DynCase
+chosen	/tmp/cove-scripts/pool/corpus/ir/3782ef72e615fde580e2169a44f014d8b5a49f87	1.3	4	c:CmpBranch.Float.Eq m:string.byte_at.empty.index_past mc:string.byte_at.empty.index_past x:CmpBranch.Float.Eq
+chosen	/tmp/cove-scripts/pool/corpus/ir/17f9c8878cf3557b5b1b8720afd4b970fa88c843	1.4	4	c:CmpBranch.Int.Le t:CmpBranch.Int.Le:equal tc:CmpBranch.Int.Le:equal x:CmpBranch.Int.Le
+chosen	/tmp/cove-scripts/pool/corpus/ir/d8e9a96a9980bfe4cf6641030c424ba54992d214	1.5	4	c:CmpBranch.Int.Eq t:CmpBranch.Int.Eq:equal tc:CmpBranch.Int.Eq:equal x:CmpBranch.Int.Eq
+chosen	/tmp/cove-scripts/pool/corpus/ir/0c0d2c44603c40262892fe670fbaaefcacfc493a	0.6	3	x:DynIdentityLeave x:ScopeCancel x:Switch
+chosen	/tmp/cove-scripts/pool/corpus/ir/f1afdf6ebf271786455a26910a06fee13a8cc506	1.6	4	c:CmpBranch.Bool.Ne c:CmpBranch.Str.Lt x:CmpBranch.Bool.Ne x:CmpBranch.Str.Lt
+chosen	/tmp/cove-scripts/pool/corpus/ir/1b4d52cdf9e6f9887efc91e4d45b40249e89daa4	1.7	4	m:array.load.negative m:float.from_int.inexact mc:array.load.negative mc:float.from_int.inexact
+chosen	/tmp/cove-scripts/pool/corpus/ir/448a56d8f88ecb42303facf900d9847ee99c739c	0.9	3	m:float.cmp.nan t:Cmp.Int.Eq:equal x:Cmp.Bool.Ne
+chosen	/tmp/cove-scripts/pool/corpus/ir/df914d1d72f12f867415b6199d335cd05f684dfe	1.0	3	c:CmpBranch.Tag.Ne t:CmpImm.Gt:equal x:CmpBranch.Tag.Ne
+chosen	/tmp/cove-scripts/pool/corpus/ir/d474c562f155a44bd8e6e439f8a24d888f254d9a	1.0	3	m:string.slice.combining.from_0 m:string.slice.multibyte.from_0 x:DynCount
+chosen	/tmp/cove-scripts/pool/corpus/ir/770b12f420c3b6ba5a4c0ed63f1625275624cf19	1.2	3	c:Cmp.Float.Ge mc:string.byte_at.astral.index_0 x:Cmp.Float.Ge
+chosen	/tmp/cove-scripts/pool/corpus/ir/9dfa413d6a2a4b1a09e636de1345140bed391461	0.4	2	x:AddrOfField x:Cancel
+chosen	/tmp/cove-scripts/pool/corpus/ir/2a95dce71dd325172de68abcd68fd758d7670a3a	0.5	2	m:string.slice.combining.end_past m:string.slice.multibyte.end_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/b3f4a6abda95c4b14275db70bcf73317d00ccd2e	0.5	2	t:CmpImmBranch.Le:equal x:DynRead
+chosen	/tmp/cove-scripts/pool/corpus/ir/fc422e4ca18fa424668e922ceb99e7b6a99cc943	0.5	2	c:CmpBranch.Float.Lt x:CmpBranch.Float.Lt
+chosen	/tmp/cove-scripts/pool/corpus/ir/5958a082adbca439933f01a7487617c9de29e686	0.5	2	x:CallClosure x:HandleText
+chosen	/tmp/cove-scripts/pool/corpus/ir/6874acca0bb9c2a3817e3c283ec02f78f25ecbe4	0.6	2	m:array.store.negative mc:array.store.negative
+chosen	/tmp/cove-scripts/pool/corpus/ir/4409053da778a8ea7e5177e30e49ecba8fb1582d	0.6	2	m:string.byte_at.ascii.index_past mc:string.byte_at.ascii.index_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/0b8122462ffc7d06bce206f823b676dc0e533d4b	0.7	2	m:string.slice.astral.from_0 x:CmpBranch.Bool.Le
+chosen	/tmp/cove-scripts/pool/corpus/ir/e4489472f6dc5279821d642dadf7f7946b0f95fc	0.7	2	m:int.div.unit mc:int.div.unit
+chosen	/tmp/cove-scripts/pool/corpus/ir/c7ed4f7425c1c9cc31f5183c4c8cad20aeab300d	0.7	2	m:array.store.past mc:array.store.past
+chosen	/tmp/cove-scripts/pool/corpus/ir/2f6bb93fefa5bb630488f285d5b5079bb6ba5c25	0.8	2	t:CmpImm.Ge:equal tc:CmpImm.Ge:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/c3974d1d54ddbf5142d4a09aa2117b00257dea3d	1.0	2	t:CmpImm.Ne:equal tc:CmpImm.Ne:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/85ed4bd7d9402d9608853b85c893effe1fe9d9a6	1.0	2	t:Arith.Int.Mul:overflow tc:Arith.Int.Mul:overflow
+chosen	/tmp/cove-scripts/pool/corpus/ir/a5b0ab51d01aff3d3333077291e8b6b6670af977	1.0	2	m:float.arith.inf mc:float.arith.inf
+chosen	/tmp/cove-scripts/pool/corpus/ir/3ed91cb3f6c2e8a3cb1687e7f7dd59d015fd9f14	1.1	2	m:string.byte_at.combining.index_0 mc:string.byte_at.combining.index_0
+chosen	/tmp/cove-scripts/pool/corpus/ir/69c312f949b73c9168e2f0db096f3b986f531677	1.1	2	m:float.arith.subnormal mc:float.arith.subnormal
+chosen	/tmp/cove-scripts/pool/corpus/ir/88ed832d547bc00aea2735953ab98afba3a767d1	1.2	2	t:Arith.Int.Add:overflow tc:Arith.Int.Add:overflow
+chosen	/tmp/cove-scripts/pool/corpus/ir/cd16e7ef7154fda4cc3f0b41033c45b428bd186e	1.2	2	m:float.cmp.subnormal mc:float.cmp.subnormal
+chosen	/tmp/cove-scripts/pool/corpus/ir/4aaf68fc7af5bbb2206af3adf6f7767a03427b1c	1.4	2	m:string.byte_at.ascii.index_len mc:string.byte_at.ascii.index_len
+chosen	/tmp/cove-scripts/pool/corpus/ir/278bbdab68fe1c342605b6344d7437de75ba9de1	1.6	2	m:string.byte_at.combining.index_past mc:string.byte_at.combining.index_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/427e1cc606b5ad331abfa6103ead657959dd25b9	1.6	2	c:CmpBranch.Str.Ge x:CmpBranch.Str.Ge
+chosen	/tmp/cove-scripts/pool/corpus/ir/534f94cf4951fa5b458982a97a2913740e88d93f	2.1	2	t:CmpBranch.Int.Ne:equal x:CmpBranch.Int.Ne
+chosen	/tmp/cove-scripts/pool/corpus/ir/4296aa2b8b9919f50bd4f67a4c168320a435858f	0.3	1	x:SharedUnlock
+chosen	/tmp/cove-scripts/pool/corpus/ir/2575b8770f8e816ad2798f28d5ac76d6847e884a	0.3	1	x:DynHandleText
+chosen	/tmp/cove-scripts/pool/corpus/ir/ef9d1975e8cf7bfbb75c502e81b2a692934bbe24	0.3	1	x:RunCopy
+chosen	/tmp/cove-scripts/pool/corpus/ir/82862a2179bf01ce455277908d9853d04995a2ff	0.3	1	x:DynKind
+chosen	/tmp/cove-scripts/pool/corpus/ir/181267986ea8515cf4151e82d0cc2c36f02d326e	0.3	1	x:CallResource
+chosen	/tmp/cove-scripts/pool/corpus/ir/7d3bb379a13ff0e710d8fcefba513a8d792e62e1	0.3	1	x:DynCaseName
+chosen	/tmp/cove-scripts/pool/corpus/ir/71dd262db703d1934f69d93a505a6df54cfb022c	0.4	1	x:DynNameOrder
+chosen	/tmp/cove-scripts/pool/corpus/ir/0b1d6c685263498b1213677c1e7f3a2e47f70abf	0.4	1	x:DynOpen
+chosen	/tmp/cove-scripts/pool/corpus/ir/3d5d8697833225144e567d5bcdf1e1eacf366512	0.4	1	x:DynChild
+chosen	/tmp/cove-scripts/pool/corpus/ir/049fd5b3837fbdedee5547721c35cd6d638cf886	0.4	1	x:Trap
+chosen	/tmp/cove-scripts/pool/corpus/ir/6a140a40b63624550f69ee4fae9a05d273a954c8	0.4	1	x:Cmp.Identity.Ge
+chosen	/tmp/cove-scripts/pool/corpus/ir/1bf38e972ebb2818e26ba7430435cbb97dee5f06	0.4	1	x:CallHost
+chosen	/tmp/cove-scripts/pool/corpus/ir/77f7d36c394f736fd95551d256fa10498c768f6d	0.4	1	m:string.slice.ascii.end_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/a2ed4c216079b2cfdb2bf1cd28b4fa25d3f162f0	0.4	1	x:Spawn
+chosen	/tmp/cove-scripts/pool/corpus/ir/cfe6e48e764e8a057fd604dc409117058d5e2608	0.4	1	x:DynOpaque
+chosen	/tmp/cove-scripts/pool/corpus/ir/a75f24b792da736e50d25e388fe60e57bbed2d70	0.4	1	x:Unbox
+chosen	/tmp/cove-scripts/pool/corpus/ir/bf4d8ba4e3d986b06b7f3affd0dbcb5b272d7476	0.4	1	x:GrowableTruncate
+chosen	/tmp/cove-scripts/pool/corpus/ir/1ce3f27a7a75cbf4bda79cea4701054947c7375f	0.4	1	x:RunFinish
+chosen	/tmp/cove-scripts/pool/corpus/ir/baaa281cecbb4b81de6b3b84e6354ef6a99fc31d	0.5	1	x:DynFieldName
+chosen	/tmp/cove-scripts/pool/corpus/ir/8ecb77841b9c64731336259c42a1303295dfae53	0.5	1	x:CmpBranch.Str.Gt
+chosen	/tmp/cove-scripts/pool/corpus/ir/5c1d5debf6b0afa4c02c45fcacaf8cf4b5386481	0.7	1	x:CmpBranch.Bool.Ge
+chosen	/tmp/cove-scripts/pool/corpus/ir/3a9519436d790f26b29b147b3108873849a40f93	0.8	1	tc:Cmp.Int.Eq:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/6f37447bdc675010ba49daea78e33f1205516e74	0.9	1	m:string.slice.empty.end_past
+chosen	/tmp/cove-scripts/pool/corpus/ir/2070e79b99b4a1c8ba0158d265be41cc5b0a21c4	0.9	1	x:CmpBranch.Tag.Gt
+chosen	/tmp/cove-scripts/pool/corpus/ir/eb4f42c0edff420978d5605dac155f636aa2acbc	1.1	1	c:Cmp.Bool.Ne
+chosen	/tmp/cove-scripts/pool/corpus/ir/5e273fb0f976bf1e5fbdd40f9800ebcd8fc84074	1.3	1	tc:CmpImm.Gt:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/73c5f207fc6370a8c3a5c143790737a37112e614	1.3	1	mc:float.cmp.nan
+chosen	/tmp/cove-scripts/pool/corpus/ir/ff28c32df3fbfed0b03ffac9d60c82140f06a429	1.4	1	x:CmpBranch.Tag.Ge
+chosen	/tmp/cove-scripts/pool/corpus/ir/f37e522a3cf918feac9e0fdf50a56a9f60613544	1.8	1	tc:CmpImmBranch.Le:equal
+chosen	/tmp/cove-scripts/pool/corpus/ir/cf1f584c3e99ceeea62f3596d8af3d720ff05c26	2.1	1	x:CmpBranch.Int.Gt
+# budget 6.0s; spent 0.09s, of which mandatory 0.01s (9 inputs); chosen 90 of 4801 pool inputs
+# features: 473 covered of 473 the pool and the mandatory inputs reach; 0 left to the nightly corpus
