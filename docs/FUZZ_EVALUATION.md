@@ -22,6 +22,7 @@ bugs nobody has seen.
 - `differential` と `ir` の探索は、1 session 45 s・4 worker で、見つけた欠陥の大半を数秒〜数十秒で見つける（median 1〜19 s）。`ir` は #723 以前は native code を実質実行しておらず、001/002 を 1 件も検出できなかった。
 - 専用テストが見逃して fuzzing だけが見つけた欠陥がある（012、VM の `byteAt` の off-by-one）。逆に fuzzing では原理的に見えない欠陥もある：run 間の状態（014、harness は毎回新しい machine で 1 回だけ走らせる）と capability（015、全 evaluator が同じ host registry を使うので oracle がない）。
 - 探索中に本物のバグを 5 件見つけた（#720、#721、#726、#728、#734）。
+- （2026-10-31、section 11）committed seed から 1 target 300 s の session 1 回で作った corpus は、Rust の分岐（`if`/`&&` 等の条件の各側）を parser 92%、checker 57%、lowering 59%、verifier 69%、VM 52%、native 生成器 56%、GC 56% 到達する。IR 命令 key は verifier が許す 185 個中 175 個を実行（compiled code 内では 124 個）、型 × 境界値の 107 セル中 104 個を実行（compiled code 内 97 個）。到達は検出ではない。
 
 **言えないこと**
 
@@ -802,6 +803,284 @@ for budget before it ran. What is measured is per change, in sections 6–9:
 001 and 002 on `ir` (0 of 4,288 inputs before; found in 16–80 s after, §6),
 004 (found by nothing before; by a dedicated test and a seed after, §8), 003
 (unchanged within the seed spread, §7), 002 on `differential` (unchanged, §9).
+
+## 11. What the corpus reaches: branches by component, instruction kinds and boundaries (issue 705)
+
+Three questions about one fixed corpus: how much of each component's Rust
+code its replay reaches, which IR instruction kinds its programs execute, and
+which combinations of an important type and a boundary value they execute.
+Reaching is not detecting: everything here is a count of what ran, not of what
+a comparison would have caught (section 10 is the detection measurement).
+
+### How
+
+`scripts/fuzz-coverage-report.sh --out DIR`, 2026-10-31, at `686d300`
+(origin/main; the measuring code is this section's change and touches only
+`cove-fuzz` and `scripts/`), x86-64 macOS, i7-10700K, 16 threads, nightly
+`rustc 1.95.0-nightly (47611e160 2026-02-12)`, cargo-fuzz 0.11.2,
+cargo-llvm-cov 0.9.1 (for its llvm-tools; the script calls `llvm-profdata`
+and `llvm-cov` directly). Total wall time about 65 minutes.
+
+- **Corpus.** Per target, a starting corpus of the committed `fuzz/seeds/<t>`
+  and `fuzz/regressions/<t>` (not `known/`), then **one session of 300 s,
+  `-fork=4`, libFuzzer seed 1, no sanitizer** (`scripts/fuzz-measure.sh
+  --runs 1`); the corpus is what the session grew. No session found anything.
+
+  | target | start | corpus | executions (last progress line) |
+  |---|---:|---:|---:|
+  | `parse` | 1 | 3,762 | 6,288,319 |
+  | `compile` | 1 | 3,995 | 2,484,338 |
+  | `run` | 2 | 3,946 | 2,891,993 |
+  | `structured` | 6 | 2,193 | 13,612 |
+  | `differential` | 11 | 1,976 | 10,101 |
+  | `differential_source` | 18 | 2,927 | 598,705 |
+  | `ir` | 9 | 5,503 | 212,752 |
+  | `ir_mutate` | 6 | 1,187 | 373,476 |
+  | `image` | 12 | 1,128 | 934,999 |
+
+  (`structured` and `differential` compile every input and run it in every
+  mode, which is why their execution counts are four orders of magnitude
+  lower; both still grew about 2,000 inputs.)
+- **Rust branches.** `cove-fuzz` built by nightly with
+  `-C instrument-coverage -Z coverage-options=branch` (profile `checked`,
+  feature `template`, its own target directory), replaying each target's corpus
+  through the target's own harness (`cove-fuzz <target> FILE...`, the function
+  libFuzzer calls), 50 inputs a process; no replay stopped on a finding. One
+  profile per target, and their union. A **branch** is one side of a condition
+  as rustc's branch instrumentation emits it: `if`, `while`, `&&`, `||`,
+  `if let`, `let … else`. **A `match` arm is not a branch** in this
+  instrumentation — it is a region — so the region columns are given beside
+  the branch columns, labelled as regions. A branch in several monomorphised
+  copies of one generic function is counted once, taken if any copy took it.
+- **Components**, by file (`scripts/fuzz-coverage-components.py`'s
+  `COMPONENTS`; test modules are not compiled into the binary and are not
+  counted):
+
+  | component | files |
+  |---|---|
+  | parser | `cove-syntax`: `lexer.rs`, `parser.rs`, `number.rs`, `token.rs`, `ast.rs` (not `format.rs`) |
+  | checker | `cove-sema/src/**` (resolve, typeck, unique, facts, markup_if, package, stdlib, …) |
+  | lowering | `cove-ir/src/lower/**`, `cove-ir/src/legalize.rs` |
+  | verifier | `cove-ir/src/verify.rs`, `cove-ir/src/verify/**`, `cove-ir/src/bytecode/verify.rs` |
+  | VM | `cove-runtime/src/vm/**` and `cove-ir/src/bytecode/**` (encoder, decoder, ops), less the rows below |
+  | native generator | `cove-native/src/**` (template, subset, abi), and the runtime's native glue `cove-runtime/src/native.rs`, `vm/exec/native.rs` |
+  | GC | `cove-runtime/src/heap.rs` (the interpreter's collector), and in `vm/mem.rs`, `vm/exec.rs` and `vm/exec/frames.rs` the functions named for collecting, marking, tracing, sweeping or roots (`GC_FUNCTIONS`) |
+
+  Reported beside them so nothing is dropped: the AST interpreter
+  (`interp.rs`), the rest of `cove-runtime` (builtins, values, hosts) and of
+  `cove-ir`, the VM's debugger and profiler views (on no replay path), the
+  harness itself, and `other` (`cove-diag`, the Rust formatter, …).
+- **Instruction kinds and the matrix.** The ordinary build's `cove-fuzz
+  coverage <target>` over each corpus of a target that runs programs (all but
+  `parse` and `compile`), as in section 2. `cove-fuzz coverage-defined` lists
+  what the counts are against.
+
+### Measured: branches by component (union of every target)
+
+| component | branches | reached | % | regions | reached | % |
+|---|---:|---:|---:|---:|---:|---:|
+| parser | 634 | 581 | **91.6%** | 5,057 | 4,828 | 95.5% |
+| checker | 1,814 | 1,032 | **56.9%** | 17,773 | 11,889 | 66.9% |
+| lowering | 2,366 | 1,395 | **59.0%** | 28,735 | 18,424 | 64.1% |
+| verifier | 572 | 396 | **69.2%** | 5,557 | 4,949 | 89.1% |
+| VM | 1,428 | 745 | **52.2%** | 17,348 | 11,342 | 65.4% |
+| native generator | 564 | 314 | **55.7%** | 10,911 | 9,245 | 84.7% |
+| GC | 150 | 84 | **56.0%** | 1,079 | 783 | 72.6% |
+| *interpreter* | 344 | 163 | 47.4% | 5,010 | 2,687 | 53.6% |
+| *runtime, other* | 902 | 252 | 27.9% | 10,491 | 2,690 | 25.6% |
+| *ir, other* | 138 | 98 | 71.0% | 3,603 | 2,468 | 68.5% |
+| *VM debugger/profiler* | 58 | 0 | 0.0% | 1,286 | 0 | 0.0% |
+
+Per target, branches reached as a share of the component's branches:
+
+| target | parser | checker | lowering | verifier | VM | native | GC |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `parse` | 89.0% | 0 | 0 | 0 | 0 | 0 | 0 |
+| `compile` | 87.1% | 54.4% | 46.7% | 37.6% | 0 | 0 | 0 |
+| `run` | 85.8% | 54.6% | 46.6% | 43.4% | 24.7% | 41.0% | 0 |
+| `structured` | 46.8% | 44.2% | 55.1% | 45.6% | 34.7% | 46.5% | 24.7% |
+| `differential` | 46.8% | 44.4% | 55.2% | 45.5% | 35.4% | 46.3% | 46.7% |
+| `differential_source` | 80.9% | 54.5% | 55.7% | 46.3% | 33.8% | 44.9% | 26.0% |
+| `ir` | 0 | 0 | 1.9% | 56.5% | 41.1% | 53.9% | 36.0% |
+| `ir_mutate` | 0 | 0 | 2.3% | 51.7% | 37.9% | 43.6% | 24.0% |
+| `image` | 0 | 0 | 2.4% | 62.2% | 36.4% | 48.9% | 27.3% |
+| **union** | 91.6% | 56.9% | 59.0% | 69.2% | 52.2% | 55.7% | 56.0% |
+
+(`compile` reaches the verifier because the lowering verifies what it
+lowers, `cove-ir/src/lower/mod.rs:716`. `run` reaches no GC branch;
+**inferred:** none of its 81 programs that lower allocates enough to collect.)
+
+### Measured: where the unreached branches are (union)
+
+The functions with the most unreached branches, five a component (the
+script's `report.md` lists ten). "Why" is **inferred** from the function and
+from what the generators write; no replay was run to confirm it.
+
+| component | function (file:line) | unreached / branches | what it handles; why not reached |
+|---|---|---:|---|
+| parser | `lex_triple_string` (lexer.rs:755) | 12 / 62 | `"""` strings: indentation and escape errors — mutation rarely keeps a valid triple-quoted frame |
+| parser | `fmt` ×3 (ast.rs:298, 249, 94) | 18 / 18 | `Display` of AST nodes — used by diagnostics/tools, not by parsing |
+| parser | `parse_trait_decl` (parser.rs:1299) | 3 / 8 | trait declarations with defaults — rare in seeds |
+| checker | `resolve_module` (resolve.rs:728) | 30 / 44 | multi-module resolution — every fuzzed program is one module, `playground` |
+| checker | `check_literal_arms` (resolve.rs:3283) | 18 / 22 | exhaustiveness of literal `match` arms (`Bool`, `Int`, `String`) — generators do not write literal patterns |
+| checker | `check_tests` (typeck.rs:877) | 18 / 18 | `test fn` declarations — the harness compiles no tests |
+| checker | `same_markup_help`, `insertion` (markup_if.rs:149, 253) | 30 / 30 | markup-`if` diagnostics — no markup in the corpus |
+| checker | `check_entries`, `signature_difference` (typeck.rs:9873, 10081) | 32 / 32 | entry-point and trait-signature mismatch diagnostics — rejected inputs of a shape the mutator does not make |
+| lowering | `recognize` (legalize.rs:211) | 30 / 82 | fused-window recognition: the window shapes (appends, pushes) a corpus program rarely forms |
+| lowering | `plan` (loads.rs:1234) | 21 / 122 | the cases in which `plan` declines to answer a plan |
+| lowering | `assertion` (assertions.rs:71) | 16 / 16 | `assert` — not in the generators' grammar |
+| lowering | `shared_lock`, `shared_new` (cells.rs:139, 79) | 26 / 26 | `Shared` cells — tasks are not granted (`max_tasks: 0`) and generators write none |
+| lowering | `call_dyn` (dispatch.rs:1567), `admit_by_walk` (core.rs:1576) | 28 / 28 | dynamic dispatch and walked admission — `Dynamic` values only from seeds |
+| verifier | `check_inst` (verify.rs:834) | 26 / 68 | per-instruction faults: the faults of kinds `ir`'s refusals rarely hit |
+| verifier | `guarded_by_a_walk` (verify.rs:263) | 24 / 24 | the walk-guard shape around a box's wording — no `ir` program makes it |
+| verifier | `slots` (bytecode/verify.rs:212) | 13 / 20 | bytecode slot faults — the encoder never writes them; only hand-made bytecode would |
+| verifier | `one_admission_boundary`, `words_a_refusal` (verify.rs:164, 216) | 23 / 34 | admission-boundary faults |
+| VM | `fused_append_words`, `fused_append_bytes`, `fused_push` (encoded.rs:2312, 2020, 1654) | 114 / 240 | fused append/push windows' generic arms — see `recognize` |
+| VM | `unplaced_in` (dynamic.rs:1393) | 36 / 36 | auditing a box's unplaced names — a `Dynamic` failure path |
+| VM | `family_of`, `fits` (boundary.rs:875, 1099) | 44 / 44 | host-boundary value families — only `console` is granted, and it takes strings |
+| VM | `identity_leave` (dynamic.rs:831) | 15 / 16 | walks' identity sets |
+| native | `inst_refused` (subset.rs:886) | 114 / 240 | why an instruction is outside the compiled slice: one arm per refusal; most forms are admitted, so most refusal arms never fire |
+| native | `call_body` (vm/exec/native.rs:1954) | 18 / 34 | entering compiled code from the VM: the yield and host-call resumption paths |
+| native | `offer_yield` (vm/exec/native.rs:922) | 10 / 10 | a compiled frame yielding to a scheduler — no tasks |
+| native | `missed`, `tier_up`, `loops` (native.rs:310, 455, 435) | 17 / 18 | lazy tier-up — every fuzzed mode compiles eagerly |
+| native | `growable` (vm/exec/native.rs:1573) | 9 / 14 | growable-run helper's error paths |
+| GC | `visit`, `count`, `count_task`, `visit_task` (heap.rs:860, 692, 794, 968) | 34 / 48 | the interpreter's cycle collector over maps, sets, tasks — no tasks, few maps |
+| GC | `collect` (vm/mem.rs:1517) | 6 / 10 | a collection with other tasks parked or already collecting — one task a run |
+| GC | `each_root` (vm/exec.rs:173) | 4 / 12 | roots of parked/suspended frames |
+
+Every component's branches are concentrated: of the functions with a branch,
+the share with **none** reached is parser 4 of 99, checker 53 of 257,
+lowering 80 of 336, verifier 1 of 61, VM 67 of 227, native 16 of 81, GC 2 of
+19.
+
+### Measured: IR instruction kinds
+
+185 keys are defined: every kind of `irgen::KINDS`, with `Arith`, `ArithImm`,
+`Neg`, `Cmp`, `CmpImm`, `CmpBranch` and `CmpImmBranch` split by operation and
+operand as `coverage::key` splits them, less the three-way orders the
+verifier refuses — what the verifier admits, not what the lowering emits.
+
+| target | programs measured | present | executed | executed in compiled code | executed / defined |
+|---|---:|---:|---:|---:|---:|
+| `run` | 81 | 65 | 64 | 55 | 34.6% |
+| `structured` | 2,193 | 115 | 113 | 109 | 61.1% |
+| `differential` | 1,976 | 113 | 111 | 106 | 60.0% |
+| `differential_source` | 426 | 95 | 89 | 80 | 48.1% |
+| `ir` | 4,837 | 184 | 175 | 119 | 94.6% |
+| `ir_mutate` | 587 | 73 | 72 | 64 | 38.9% |
+| `image` | 294 | 103 | 69 | 58 | 37.3% |
+| **union** | 10,394 | 184 | **175 (94.6%)** | **124 (67.0%)** | |
+
+- **Never executed (10):** `Cmp.Bool.Ge`, `Cmp.Identity.{Eq,Ne,Gt}`,
+  `CmpBranch.Identity.{Eq,Ne,Le,Ge}`, `CmpBranch.Tag.Lt` (all present in some
+  `ir` program and not reached), and `CmpBranch.Tag.Gt` (never present).
+- **Executed, never in compiled code (51):** every `Dyn*` kind and
+  `HandleText`, the task and scope kinds (`Spawn`, `Await`, `Cancel`,
+  `Settled`, `ScopeEnter/Leave/Cancel`, `SharedLock/Unlock`), `CallResource`,
+  `Box`/`Unbox`, `AddrOfField`, `AssertFailed`, `Arith.Float.Rem`, and the
+  orderings over `Bool`, `Identity` and `Tag` (`Cmp.Tag.Lt`, …,
+  `CmpBranch.Bool.Ge`). **Inferred:** most of these the native tier refuses
+  (`subset.rs`), so a function holding one is not compiled; the orderings only
+  `ir` makes.
+- Without `ir`, the other six targets together execute 119 keys, 113 of them
+  in compiled code: the source and image targets reach about two thirds of
+  what the verifier admits.
+
+### Measured: the type × boundary matrix
+
+`crates/cove-fuzz/src/matrix.rs`, `MATRIX` — 107 cells, each counted on the
+encoded VM (executed anywhere) and in compiled code (executed in a function
+the native tier compiles other than the entry): 214 cell × tier. A cell is an
+instruction's operands at the moment it runs:
+
+| family | operations | classes | cells |
+|---|---|---|---:|
+| `int` | add, sub, mul (`Arith.Int`, `ArithImm`) | an operand 0, ±1, `MIN`, `MAX`; exact result not an `Int` | 15 |
+| `int` | div, rem | dividend 0, divisor ±1, dividend `MIN`, `MIN / -1`, divisor 0 | 10 |
+| `int` | shl, shr, shru (`Shift`) | value negative, count 0, count 63, count outside 0..63 | 12 |
+| `int` | cmp (`Cmp.Int`, `CmpImm`, `CmpBranch.Int`, `CmpImmBranch`) | equal, differ by 1, an operand `MIN`/`MAX` | 3 |
+| `int` | neg | 0, `MIN` | 2 |
+| `float` | arith (`Arith.Float`, `Neg.Float`), cmp, to_int (`FloatTruncate`), math (abs, round, sqrt, min/max) | an operand NaN, +0, −0, ±∞, subnormal | 20 |
+| `float` | to_int; from_int (`Convert.IntToFloat`) | finite outside [−2⁶³, 2⁶³); not exact | 2 |
+| `string` | byte_at (`RunLoad` of bytes) × content | index 0, = length, > length | 15 |
+| `string` | slice (`RunSlice` of bytes) × content | from 0, end = length, end > length | 15 |
+| `array` | load, store (`LoadElem`, `StoreElem`) | index −1 (<0), 0, last, = length, > length | 10 |
+| `array` | len (`Len` of anything but a `String`) | 0, 1, ≥ 1024 | 3 |
+
+String content is empty, ASCII, or any of multibyte (a 2–3-byte character),
+astral (4-byte), combining (a mark in the combining blocks); positions are in
+bytes. An array's length is its header length (a `Vector`'s store is its
+capacity). Not in the matrix: `Float.parse` and `Float` formatting, which are
+Cove code rather than one instruction.
+
+| target | int (VM / compiled) | float | string | array | all |
+|---|---:|---:|---:|---:|---:|
+| `run` | 16 / 14 of 42 | 0 / 0 of 22 | 7 / 7 of 30 | 6 / 6 of 13 | 29 / 27 |
+| `structured` | 40 / 39 | 22 / 22 | 25 / 17 | 7 / 6 | 94 / 84 |
+| `differential` | 40 / 36 | 22 / 22 | 24 / 20 | 6 / 6 | 92 / 84 |
+| `differential_source` | 19 / 17 | 15 / 13 | 7 / 7 | 6 / 6 | 47 / 43 |
+| `ir` | 37 / 36 | 20 / 17 | 20 / 11 | 12 / 12 | 89 / 76 |
+| `ir_mutate` | 18 / 16 | 0 / 0 | 9 / 9 | 7 / 6 | 34 / 31 |
+| `image` | 19 / 16 | 0 / 0 | 7 / 7 | 6 / 6 | 32 / 29 |
+| **union** | 41 / 41 of 42 | 22 / 22 of 22 | 28 / 22 of 30 | 13 / 12 of 13 | **104 / 97 of 107 (201 of 214)** |
+
+- **Never executed (3):** `int.div.overflow` (`MIN / -1` — `rem`'s is
+  executed, in 2 programs), `string.slice.empty.end_past`,
+  `string.slice.astral.end_past`.
+- **Executed, never in compiled code (7):** `string.byte_at.astral.index_len`,
+  `string.byte_at.combining.index_len`, `string.byte_at.combining.index_past`,
+  `string.slice.{ascii,multibyte,combining}.end_past`, `array.len.large`.
+- **Thin cells** (executed in compiled code by ≤ 11 of 10,394 programs):
+  `int.sub.overflow` 3, `int.mul.min` 7, `int.rem.min` 9, `int.rem.overflow`
+  1, `int.shl.count_63` 11, `int.shr.count_63` 3, `int.shr.count_out_of_range`
+  11, `int.neg.min` 3, `string.byte_at.{ascii,multibyte,astral}.index_past`
+  4–5, `string.byte_at.empty.index_past` 4, `string.byte_at.ascii.index_len`
+  4. `int.mul.overflow` is 86 programs
+  anywhere and 20 in compiled code (section 2's 3–4 of ~2,000 was the
+  `differential` corpus alone).
+
+**Inferred:** the source-shaped targets (`run`, `differential_source`,
+`ir_mutate`, `image`) reach no `float` cell outside `differential_source`
+and few boundary cells at all: their corpora grew from a handful of seeds
+in one session and keep the values those seeds hold. The cells come almost
+wholly from the two generators and `ir`.
+
+**Measured, per target:** `slice.*.end_past`, `array.load.{negative,
+index_len, past}` and `array.store.index_len` are executed by `ir` alone
+(`array.store.past` also by 12 `ir_mutate` programs); `byte_at.*.index_past`
+by `structured` (21 programs) and `differential` (3) as well. **Inferred:**
+that split is where the bound is checked — `byteAt` leaves its bound to the
+instruction (`lower/methods.rs`, `byte_at`), while an element index is
+checked in the lowered code before `LoadElem`, and a slice past the end is
+refused in `std.string` before `RunSlice` runs — so the out-of-range cells of
+those instructions are tested only against generated IR, never from
+source.
+
+### What this does and does not show
+
+- **Coverage is not detection.** A branch reached or a cell executed says the
+  code ran in that state, not that a wrong answer there would differ from a
+  right one in anything a differential compares (section 10 measures that, for
+  sixteen defects).
+- **It is this corpus.** One 300 s session per target from the committed
+  seeds; a longer session, another libFuzzer seed, or the repository's
+  programs as a starting corpus (as sections 1–10 used) would move every
+  number. One session is a point, not a spread.
+- **Native machine code is not instrumented.** The native generator's rows are
+  the Rust that *generates and enters* code; the emitted code runs without
+  counters. The matrix's and instruction table's compiled columns are section
+  2's inference — the encoded VM's watched run, attributed to compiled code
+  when the function is compiled and is not the entry.
+- **Instrumentation changes the run.** The instrumented binary is slower, and
+  a run is bounded by a 150 ms deadline, so a replay may stop where the
+  session's run did not; the counts are of the replay.
+- **Only linked code is counted.** A generic function never instantiated in
+  `cove-fuzz` has no coverage record and is in no denominator.
+- **Branches are conditions, not arms.** A `match` is regions, not branches,
+  in rustc's branch coverage; a component written mostly as `match` (the
+  checker, the VM's dispatch) has more of its decisions in the region columns.
+- **The defined keys are the verifier's.** 185 is what the verifier admits;
+  `Cmp.Bool.Lt` is admitted and no source makes it.
 
 ## What is not known from these
 
