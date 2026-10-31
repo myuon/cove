@@ -35,6 +35,14 @@
 //! The counts are of **programs**: `coverage.<key>.executed` is how many
 //! programs executed an instruction of that key at least once.
 //!
+//! The watched run also reads the operands of the instructions
+//! [`crate::matrix`] classifies — up to [`TRIGGER_READS`] times a site, or
+//! [`OBJECT_READS`] where reading them renders a heap object — and counts
+//! each cell of the type × boundary matrix they fall in as
+//! `matrix.<cell>.executed` and `matrix.<cell>.executed_compiled`, by the
+//! rule `executed_compiled` follows. [`defined_keys`] and
+//! [`crate::matrix::cells`] are what the counts are against.
+//!
 //! # What it does not say
 //!
 //! - **The native tier's own execution is not observed.** The debugger
@@ -68,8 +76,10 @@ use crate::{on_stack, ENTRY, HEAP_WORDS, MODULE};
 /// How much longer than the target's deadline a watched run is given.
 pub const WATCH_SLOWDOWN: u32 = 40;
 
-/// The targets [`replay`] can measure.
-pub const TARGETS: [&str; 5] = [
+/// The targets [`replay`] can measure: every target that runs a program.
+pub const TARGETS: [&str; 7] = [
+    "run",
+    "structured",
     "differential",
     "differential_source",
     "ir",
@@ -93,6 +103,51 @@ pub fn key(inst: &Inst) -> String {
         Inst::CmpImmBranch { op, .. } => format!("CmpImmBranch.{op:?}"),
         other => format!("{:?}", crate::irgen::kind_of(other)),
     }
+}
+
+/// Every key [`key`] can answer for an instruction whose operands the
+/// verifier's shape checks admit: each kind of [`crate::irgen::KINDS`], with
+/// the arithmetic and comparison families split by operation and operand as
+/// [`key`] splits them, and without a three-way order where the verifier
+/// refuses one (anything but `Cmp` over a type a key's order exists for).
+///
+/// It is what the verifier admits, not what the lowering emits: a key such as
+/// `Cmp.Bool.Lt` is admitted and no source makes it.
+pub fn defined_keys() -> Vec<String> {
+    use crate::irgen::{Kind, KINDS};
+    let nums = ["Int", "Float"];
+    let ariths = ["Add", "Sub", "Mul", "Div", "Rem"];
+    let compares = ["Int", "Float", "Bool", "Str", "Identity", "Tag"];
+    let ops = ["Eq", "Ne", "Lt", "Le", "Gt", "Ge"];
+    let mut out = Vec::new();
+    for kind in KINDS {
+        match kind {
+            Kind::Arith => {
+                for n in nums {
+                    for op in ariths {
+                        out.push(format!("Arith.{n}.{op}"));
+                    }
+                }
+            }
+            Kind::ArithImm => out.extend(ariths.iter().map(|op| format!("ArithImm.{op}"))),
+            Kind::Neg => out.extend(nums.iter().map(|n| format!("Neg.{n}"))),
+            Kind::Cmp | Kind::CmpBranch => {
+                for on in compares {
+                    for op in ops {
+                        out.push(format!("{kind:?}.{on}.{op}"));
+                    }
+                    if kind == Kind::Cmp && !matches!(on, "Float" | "Identity") {
+                        out.push(format!("Cmp.{on}.Order"));
+                    }
+                }
+            }
+            Kind::CmpImm | Kind::CmpImmBranch => {
+                out.extend(ops.iter().map(|op| format!("{kind:?}.{op}")));
+            }
+            other => out.push(format!("{other:?}")),
+        }
+    }
+    out
 }
 
 /// How a program is entered.
@@ -140,8 +195,9 @@ fn subject(target: &str, data: &[u8]) -> Option<Measured> {
         limits: crate::ir::limits(),
     };
     match target {
+        "structured" => lowered(crate::generate::from_bytes(data)),
         "differential" => lowered(crate::generate::differential_from_bytes(data)),
-        "differential_source" => lowered(std::str::from_utf8(data).ok()?.to_string()),
+        "run" | "differential_source" => lowered(std::str::from_utf8(data).ok()?.to_string()),
         "ir" => Some(ir(crate::irgen::from_bytes(data))),
         "ir_mutate" => crate::mutate::from_bytes(data).map(ir),
         "image" => crate::ir::image_input(data).map(ir),
@@ -156,6 +212,9 @@ struct Recorder {
     /// Where an instruction ran in the state that tells a right
     /// implementation from a wrong one ([`trigger`]), by function and key.
     triggered: Mutex<BTreeSet<(u32, String)>>,
+    /// The cells of [`crate::matrix`] an instruction's operands fell in, by
+    /// function and cell.
+    cells: Mutex<BTreeSet<(u32, String)>>,
     /// How often each site's operands have been read, so that a hot loop's
     /// comparison is read [`TRIGGER_READS`] times and not every time.
     reads: Mutex<BTreeMap<(u32, u32), u32>>,
@@ -165,6 +224,11 @@ struct Recorder {
 
 /// The most times one site's operands are read in one program.
 pub const TRIGGER_READS: u32 = 256;
+
+/// The most times one site's operands are read in one program when reading
+/// them renders a heap object (an element load or store, a byte load, a
+/// slice, a length), which costs the object's length.
+pub const OBJECT_READS: u32 = 32;
 
 impl Debugger for Recorder {
     fn at(&self, stop: &Stop<'_>) -> Resume {
@@ -181,18 +245,31 @@ impl Debugger for Recorder {
             .functions
             .get(site.0 as usize)
             .and_then(|f| f.code.get(site.1 as usize));
-        let Some(inst) = inst.filter(|i| has_trigger(i)) else {
+        let Some(inst) = inst.filter(|i| has_trigger(i) || observes(i)) else {
             return Resume::Go;
+        };
+        let cap = if reads_object(inst) {
+            OBJECT_READS
+        } else {
+            TRIGGER_READS
         };
         let due = self.reads.lock().is_ok_and(|mut reads| {
             let r = reads.entry(site).or_default();
             *r += 1;
-            *r <= TRIGGER_READS
+            *r <= cap
         });
         if due {
-            if let Some(k) = trigger(inst, slots_of(stop)) {
+            let slots = slots_of(stop);
+            if let Some(k) = trigger(inst, &slots) {
                 if let Ok(mut triggered) = self.triggered.lock() {
                     triggered.insert((site.0, k));
+                }
+            }
+            let object = |at: u64| stop.object(at).map(|o| view(&o));
+            let cells = observe(inst, &slots, object, &self.program);
+            if !cells.is_empty() {
+                if let Ok(mut seen) = self.cells.lock() {
+                    seen.extend(cells.into_iter().map(|c| (site.0, c)));
                 }
             }
         }
@@ -215,6 +292,231 @@ fn slots_of(stop: &Stop<'_>) -> impl Fn(u32) -> Option<u64> {
         }
     }
     move |slot| words.get(&slot).copied()
+}
+
+/// A heap object as the matrix reads it: its text if it is a `String`, and
+/// its length — a `String`'s in bytes, a `Vector`'s or a builder's logical
+/// one, any other run's header length.
+pub struct View {
+    /// The text, if the object is a `String`.
+    pub text: Option<String>,
+    /// The length.
+    pub len: u64,
+}
+
+fn view(object: &cove_runtime::Object) -> View {
+    let fields = object.fields();
+    match fields.first() {
+        Some(f) if f.name() == "text" => View {
+            text: Some(f.value().to_string()),
+            len: f.value().len() as u64,
+        },
+        Some(f) if f.name() == "length" => View {
+            text: None,
+            len: f.value().parse().unwrap_or(0),
+        },
+        _ => View {
+            text: None,
+            len: fields.len() as u64,
+        },
+    }
+}
+
+/// Whether [`observe`] reads `inst`'s operands.
+fn observes(inst: &Inst) -> bool {
+    use cove_ir::{Compare, Convert, Storage};
+    matches!(
+        inst,
+        Inst::Arith { .. }
+            | Inst::ArithImm { .. }
+            | Inst::Neg { .. }
+            | Inst::Shift { .. }
+            | Inst::Cmp {
+                on: Compare::Int | Compare::Float,
+                ..
+            }
+            | Inst::CmpBranch {
+                on: Compare::Int | Compare::Float,
+                ..
+            }
+            | Inst::CmpImm { .. }
+            | Inst::CmpImmBranch { .. }
+            | Inst::FloatAbs { .. }
+            | Inst::FloatMinMax { .. }
+            | Inst::FloatRound { .. }
+            | Inst::FloatSqrt { .. }
+            | Inst::FloatTruncate { .. }
+            | Inst::Convert {
+                to: Convert::IntToFloat,
+                ..
+            }
+            | Inst::LoadElem { .. }
+            | Inst::StoreElem { .. }
+            | Inst::Len { .. }
+            | Inst::RunLoad {
+                storage: Storage::PackedBytes,
+                ..
+            }
+            | Inst::RunSlice {
+                storage: Storage::PackedBytes,
+                ..
+            }
+    )
+}
+
+/// Whether reading `inst`'s operands renders a heap object.
+fn reads_object(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::RunLoad { .. }
+            | Inst::RunSlice { .. }
+            | Inst::LoadElem { .. }
+            | Inst::StoreElem { .. }
+            | Inst::Len { .. }
+    )
+}
+
+/// The cells of [`crate::matrix`] `inst` falls in, read from its operands
+/// before it runs: `slot` reads a frame word, `object` renders the heap
+/// object a word addresses.
+pub fn observe(
+    inst: &Inst,
+    slot: impl Fn(u32) -> Option<u64>,
+    object: impl Fn(u64) -> Option<View>,
+    program: &Program,
+) -> Vec<String> {
+    use crate::matrix::{classify, Observed};
+    use cove_ir::{ArithOp, Compare, Convert, Num, ShiftOp, Storage};
+    let int = |s: u32| slot(s).map(|w| w as i64);
+    let float = |s: u32| slot(s).map(f64::from_bits);
+    let arith = |op: ArithOp| match op {
+        ArithOp::Add => "add",
+        ArithOp::Sub => "sub",
+        ArithOp::Mul => "mul",
+        ArithOp::Div => "div",
+        ArithOp::Rem => "rem",
+    };
+    let floats = |op: &'static str, slots: &[u32]| -> Option<Vec<String>> {
+        let values = slots
+            .iter()
+            .map(|s| float(*s))
+            .collect::<Option<Vec<_>>>()?;
+        Some(classify(&Observed::Float { op, values }))
+    };
+    let ints = |op: &'static str, a: Option<i64>, b: Option<i64>| -> Option<Vec<String>> {
+        Some(classify(&Observed::Int { op, a: a?, b: b? }))
+    };
+    let cells = match *inst {
+        Inst::Arith {
+            num: Num::Int,
+            op,
+            a,
+            b,
+            ..
+        } => ints(arith(op), int(a), int(b)),
+        Inst::Arith {
+            num: Num::Float,
+            a,
+            b,
+            ..
+        } => floats("arith", &[a, b]),
+        Inst::ArithImm { op, a, value, .. } => ints(arith(op), int(a), Some(value)),
+        Inst::Neg {
+            num: Num::Int, a, ..
+        } => ints("neg", int(a), Some(0)),
+        Inst::Neg {
+            num: Num::Float, a, ..
+        } => floats("arith", &[a]),
+        Inst::Shift { op, a, n, .. } => {
+            let op = match op {
+                ShiftOp::Left => "shl",
+                ShiftOp::Right => "shr",
+                ShiftOp::RightLogical => "shru",
+            };
+            ints(op, int(a), int(n))
+        }
+        Inst::Cmp {
+            on: Compare::Int,
+            a,
+            b,
+            ..
+        }
+        | Inst::CmpBranch {
+            on: Compare::Int,
+            a,
+            b,
+            ..
+        } => ints("cmp", int(a), int(b)),
+        Inst::CmpImm { a, value, .. } => ints("cmp", int(a), Some(value)),
+        Inst::CmpImmBranch { a, value, .. } => ints("cmp", int(a), Some(i64::from(value))),
+        Inst::Cmp {
+            on: Compare::Float,
+            a,
+            b,
+            ..
+        }
+        | Inst::CmpBranch {
+            on: Compare::Float,
+            a,
+            b,
+            ..
+        } => floats("cmp", &[a, b]),
+        Inst::FloatAbs { a, .. } | Inst::FloatRound { a, .. } | Inst::FloatSqrt { a, .. } => {
+            floats("math", &[a])
+        }
+        Inst::FloatMinMax { a, b, .. } => floats("math", &[a, b]),
+        Inst::FloatTruncate { a, .. } => floats("to_int", &[a]),
+        Inst::Convert {
+            to: Convert::IntToFloat,
+            a,
+            ..
+        } => int(a).map(|x| classify(&Observed::FromInt(x))),
+        Inst::RunLoad {
+            run,
+            index,
+            storage: Storage::PackedBytes,
+            ..
+        } => (|| {
+            let text = object(slot(run)?)?.text?;
+            Some(classify(&Observed::ByteAt {
+                text: &text,
+                index: int(index)?,
+            }))
+        })(),
+        Inst::RunSlice {
+            args,
+            storage: Storage::PackedBytes,
+        } => (|| {
+            // The row is `dst`, `src`, `from`, `count`.
+            let row = program.args.get(args.index())?;
+            let [_, src, from, count] = row.as_slice() else {
+                return None;
+            };
+            let text = object(slot(src.slot)?)?.text?;
+            Some(classify(&Observed::Slice {
+                text: &text,
+                from: int(from.slot)?,
+                count: int(count.slot)?,
+            }))
+        })(),
+        Inst::LoadElem { obj, index, .. } | Inst::StoreElem { obj, index, .. } => (|| {
+            let len = object(slot(obj)?)?.len;
+            Some(classify(&Observed::Index {
+                store: matches!(inst, Inst::StoreElem { .. }),
+                index: int(index)?,
+                len,
+            }))
+        })(),
+        Inst::Len { obj, .. } => (|| {
+            let seen = object(slot(obj)?)?;
+            if seen.text.is_some() {
+                return None;
+            }
+            Some(classify(&Observed::Len(seen.len)))
+        })(),
+        _ => None,
+    };
+    cells.unwrap_or_default()
 }
 
 fn has_trigger(inst: &Inst) -> bool {
@@ -306,6 +608,8 @@ struct Measure {
     executed_compiled: BTreeSet<String>,
     triggered: BTreeSet<String>,
     triggered_compiled: BTreeSet<String>,
+    cells: BTreeSet<String>,
+    cells_compiled: BTreeSet<String>,
     instructions: u64,
     watched: u64,
 }
@@ -378,6 +682,7 @@ fn measure(m: Measured) -> Option<Measure> {
         program: Arc::clone(&program),
         seen: Mutex::new(BTreeSet::new()),
         triggered: Mutex::new(BTreeSet::new()),
+        cells: Mutex::new(BTreeSet::new()),
         reads: Mutex::new(BTreeMap::new()),
         count: AtomicU64::new(0),
         halt_at: out.instructions.max(1),
@@ -413,6 +718,12 @@ fn measure(m: Measured) -> Option<Measure> {
             out.triggered_compiled.insert(k.clone());
         }
         out.triggered.insert(k);
+    }
+    for (function, c) in recorder.cells.into_inner().unwrap_or_default() {
+        if compiled.contains(&function) && Some(function) != outermost {
+            out.cells_compiled.insert(c.clone());
+        }
+        out.cells.insert(c);
     }
     Some(out)
 }
@@ -486,6 +797,14 @@ pub fn replay(target: &str, paths: &[PathBuf]) -> Result<Stats, String> {
                 ] {
                     for k in set {
                         stats.add(&["coverage", k, name], 1);
+                    }
+                }
+                for (set, name) in [
+                    (&m.cells, "executed"),
+                    (&m.cells_compiled, "executed_compiled"),
+                ] {
+                    for c in set {
+                        stats.add(&["matrix", c, name], 1);
                     }
                 }
             }
@@ -572,6 +891,41 @@ pub fn summary(stats: &Stats) -> String {
     for (k, all, compiled) in &triggers {
         let _ = writeln!(out, "  {k:<36} {all:>8} {compiled:>10}");
     }
+    let defined = defined_keys();
+    let count = |column: usize| {
+        defined
+            .iter()
+            .filter(|k| rows.get(*k).is_some_and(|c| c[column] > 0))
+            .count()
+    };
+    let _ = writeln!(
+        out,
+        "instruction keys: {} defined, {} present, {} executed, {} executed in a compiled function",
+        defined.len(),
+        count(0),
+        count(1),
+        count(3),
+    );
+    let cells = crate::matrix::cells();
+    let reached = |name: &str| {
+        cells
+            .iter()
+            .filter(|c| stats.get(&["matrix", c, name]) > 0)
+            .count()
+    };
+    let _ = writeln!(
+        out,
+        "matrix cells: {} defined, {} executed, {} executed in a compiled function; never executed: {}",
+        cells.len(),
+        reached("executed"),
+        reached("executed_compiled"),
+        cells
+            .iter()
+            .filter(|c| stats.get(&["matrix", c, "executed"]) == 0)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     out
 }
 
@@ -612,5 +966,54 @@ mod tests {
             "what follows the trap is present and not run"
         );
         assert!(m.executed.len() < m.present.len());
+        let defined: BTreeSet<String> = defined_keys().into_iter().collect();
+        for k in &m.present {
+            assert!(defined.contains(k), "{k} is present and not defined");
+        }
+        assert!(
+            m.cells.contains("int.add.max") && m.cells.contains("int.add.overflow"),
+            "{:?}",
+            m.cells
+        );
+    }
+
+    /// The defined keys are unique, and every key an `ir` program holds is
+    /// one of them.
+    #[test]
+    fn defined_keys_cover_what_programs_hold() {
+        let defined = defined_keys();
+        let unique: BTreeSet<&String> = defined.iter().collect();
+        assert_eq!(unique.len(), defined.len());
+        for seed in 0u8..64 {
+            let data: Vec<u8> = (0..512u32)
+                .map(|i| (i as u8).wrapping_mul(seed | 1).wrapping_add(seed))
+                .collect();
+            let subject = crate::irgen::from_bytes(&data);
+            for f in &subject.program.functions {
+                for inst in &f.code {
+                    assert!(unique.contains(&key(inst)), "{} is not defined", key(inst));
+                }
+            }
+        }
+    }
+
+    /// The matrix reads a `String`'s bytes, an index against its object's
+    /// length, and a `Float`'s class, from a run's own operands.
+    #[test]
+    fn the_matrix_reads_operands_from_a_run() {
+        let source = "use console.println\n\nfn at(s: String, i: Int) -> Int {\n  s.byteAt(i)\n}\n\nfn half(x: Float) -> Float {\n  x / 2.0\n}\n\n/// m\nexport fn main() -> Result<Unit, Error> {\n  let z = half(0.0 - 0.0)\n  println(\"{z}\")?\n  let s = \"h\u{e9}\"\n  println(\"{at(s, 0)}\")?\n  println(\"{at(s, 3)}\")?\n  Ok(())\n}\n";
+        let m = on_stack(move || subject("differential_source", source.as_bytes()).map(measure))
+            .expect("the source lowers")
+            .expect("it verifies");
+        assert!(
+            m.cells.contains("string.byte_at.multibyte.index_0"),
+            "{:?}",
+            m.cells
+        );
+        assert!(
+            m.cells.contains("string.byte_at.multibyte.index_len"),
+            "{:?}",
+            m.cells
+        );
     }
 }

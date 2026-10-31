@@ -23,6 +23,8 @@ records the differential targets' rules ([below](#the-differential-targets)).
 | `scripts/fuzz.sh` | Runs one target with the limits below. |
 | `scripts/fuzz-measure.sh`, `scripts/fuzz-measure-table.py` | Measures a target: N sessions of a fixed length and core budget from one starting corpus, counted, and tabulated ([Measuring a target](#measuring-a-target)). |
 | `crates/cove-fuzz/src/coverage.rs` | `cove-fuzz coverage`: which instructions a corpus held and which it executed. |
+| `crates/cove-fuzz/src/matrix.rs` | The type × boundary matrix `cove-fuzz coverage` counts cells of. |
+| `scripts/fuzz-coverage-report.sh`, `scripts/fuzz-coverage-components.py`, `scripts/fuzz-coverage-table.py` | Rust branch coverage by component, instruction kinds and matrix cells over a corpus ([FUZZ_EVALUATION.md section 11](FUZZ_EVALUATION.md#11-what-the-corpus-reaches-branches-by-component-instruction-kinds-and-boundaries-issue-705)). |
 | [`FUZZ_EVALUATION.md`](FUZZ_EVALUATION.md) | What the harness was measured to reach and detect, and how. |
 | `.github/workflows/fuzz.yml` | The pull-request smoke and the nightly run. |
 
@@ -563,6 +565,22 @@ are of programs. What it
 cannot see is compiled code itself: `executed_compiled` is the inference that
 the native modes ran, as machine code, what the VM ran in a function the tier
 compiled.
+
+The same watched run also places what it reads in a **type × boundary
+matrix** (`crates/cove-fuzz/src/matrix.rs`, whose `MATRIX` is the matrix as
+data): `Int` operations × zero, ±1, `MIN`, `MAX`, overflow, a zero divisor
+and a shift count outside 0..63; `Float` operations × NaN, ±0, an infinity,
+a subnormal; `byteAt` and slicing of a `String` × its contents (empty, ASCII,
+multibyte, astral, combining) × the position (0, its length, past it); an
+element load or store × index (−1, 0, last, length, past it) and a length
+of 0, 1 or ≥ 1024 — counted as `matrix.<cell>.executed` and
+`.executed_compiled`. A site whose operands name a heap object is read at
+most 32 times a program. `cove-fuzz coverage-defined` prints what the
+counts are against: every instruction key the verifier's shape checks admit,
+and every cell. `scripts/fuzz-coverage-report.sh` builds a corpus, replays it
+on a branch-instrumented `cove-fuzz` for Rust branch coverage by component,
+runs `cove-fuzz coverage` over it, and writes the tables of
+[FUZZ_EVALUATION.md section 11](FUZZ_EVALUATION.md#11-what-the-corpus-reaches-branches-by-component-instruction-kinds-and-boundaries-issue-705).
 
 The runtime counter costs one add and one subtract each time Rust enters
 compiled code (`run_frame`, the one body every such entry goes through) and
