@@ -104,7 +104,10 @@ if [ "$build" = 1 ]; then
     want="$(echo "$slots" | awk -v s="$san" '$4 == s {print $2}' | sort -u | tr '\n' ' ')"
     t0=$(now)
     # shellcheck disable=SC2086
-    (cd "$root/fuzz" && cargo +nightly fuzz build -s "$san" --target-dir "target/san-$san" $want 2>&1 | tail -1)
+    # One target an invocation: `cargo fuzz build` takes at most one.
+    for t in $want; do
+      (cd "$root/fuzz" && cargo +nightly fuzz build -s "$san" --target-dir "target/san-$san" "$t")
+    done
     echo "fuzz targets, sanitizer $san ($want): $(echo "$(now) - $t0" | bc)s" >> "$out/build.txt"
   done
 fi

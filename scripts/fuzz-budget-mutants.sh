@@ -114,7 +114,9 @@ for mutant in "${mutants[@]}"; do
       want="$(wanted "$san")"
       # shellcheck disable=SC2086
       if [ -n "$want" ]; then
-        cargo +nightly fuzz build -s "$san" --target-dir "target/san-$san" $want 2>&1 | tail -1
+        for t in $want; do
+          cargo +nightly fuzz build -s "$san" --target-dir "target/san-$san" "$t"
+        done
       fi
     done
   ) > "$mo/build.log" 2>&1 || status=$?
