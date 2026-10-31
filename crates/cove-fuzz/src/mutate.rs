@@ -4,8 +4,8 @@
 //! the lowering writes. This starts from what the lowering wrote — a corpus
 //! program, carried in the input as an image body — and changes a few things
 //! in it: one operand of one instruction, a frame's `Repr`, a layout's field,
-//! a parameter, an argument row, a jump table, an instruction moved, copied
-//! or removed. Most edits make a program `cove_ir::verify` refuses, and that
+//! a parameter, an argument row, a jump table, a name's string id, an
+//! instruction moved, copied or removed. Most edits make a program `cove_ir::verify` refuses, and that
 //! is half the point: the refusal has to be the machine's too. The rest are
 //! programs one step away from a real one, which no generator would write.
 //!
@@ -323,7 +323,13 @@ impl Edit<'_, '_> {
         if self.program.functions.is_empty() {
             return;
         }
-        match self.byte() % 12 {
+        let which = self.byte();
+        // The four values `% 12` would map a second time onto `0..=3`, so
+        // that adding this edit left every other byte's edit as it was.
+        if which >= 252 {
+            return self.name();
+        }
+        match which % 12 {
             0..=4 => self.operand(),
             5 => self.repr(),
             6 => self.layout(),
@@ -332,6 +338,50 @@ impl Edit<'_, '_> {
             9 => self.table(),
             10 => self.move_instruction(),
             _ => self.copy_instruction(),
+        }
+    }
+
+    /// A string id a name holds — a layout's rendered name, a field's or a
+    /// case's, a resource's — moved to the string table's boundary: its last
+    /// row, its length, one past it, or near what it was. Those ids are held
+    /// outside any instruction, so [`Edit::operand`] never reaches them, and
+    /// the lowering never writes one past the table; `cove_ir::verify` has to
+    /// refuse it (mutant 013, docs/FUZZ_EVALUATION.md section 12). A program
+    /// with no names is given one, for the first layout.
+    fn name(&mut self) {
+        let len = self.program.strings.len();
+        let was = |id: Option<StrId>| id.map_or(0, |id| id.0);
+        let to = |edit: &mut Self, was: u32| match edit.byte() % 4 {
+            0 => len.saturating_sub(1) as u32,
+            1 => len as u32,
+            2 => len as u32 + 1,
+            _ => edit.index_near(was, len),
+        };
+        let rows = self.program.names.len();
+        let resources = self.program.resource_names.len();
+        if resources > 0 && (rows == 0 || self.byte() & 1 == 0) {
+            let at = self.below(resources);
+            let id = to(self, self.program.resource_names[at].text.0);
+            self.program.resource_names[at].text = StrId(id);
+            return;
+        }
+        if rows == 0 {
+            let id = to(self, 0);
+            self.program.names.push(cove_ir::LayoutNames {
+                name: Some(StrId(id)),
+                parts: Vec::new(),
+            });
+            return;
+        }
+        let at = self.below(rows);
+        let parts = self.program.names[at].parts.len();
+        let part = self.below(parts + 1);
+        if part < parts {
+            let id = to(self, self.program.names[at].parts[part].0);
+            self.program.names[at].parts[part] = StrId(id);
+        } else {
+            let id = to(self, was(self.program.names[at].name));
+            self.program.names[at].name = Some(StrId(id));
         }
     }
 
@@ -591,5 +641,73 @@ impl Edit<'_, '_> {
         };
         let inst = self.program.functions[from].code[from_pc].clone();
         self.program.functions[to].code[to_pc] = inst;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program small enough to edit quickly, which renders a struct, so
+    /// that the lowering placed names for it.
+    const SOURCE: &str = "use console.println\n\nstruct Point {\n  x: Int\n  y: Int\n}\n\n/// m\nexport fn main() -> Result<Unit, Error> {\n  println(\"{Point(x: 1, y: 2)}\")?\n  Ok(())\n}\n";
+
+    /// Every string id `program` holds in a name.
+    fn name_ids(program: &mut Program) -> Vec<&mut StrId> {
+        let names = program
+            .names
+            .iter_mut()
+            .flat_map(|names| names.name.iter_mut().chain(names.parts.iter_mut()));
+        let resources = program
+            .resource_names
+            .iter_mut()
+            .map(|named| &mut named.text);
+        names.chain(resources).collect()
+    }
+
+    /// The names edit moves a name to each side of the string table's end
+    /// within the first few thousand fixed choices, and among them to an
+    /// edit whose only fault is a name at the table's length — the program
+    /// verifies once that name is put back. A clean `verify` refuses it and
+    /// the target reports nothing: the target explores mutant 013's
+    /// boundary, and the clean build does not take the boundary for a
+    /// finding. With the mutant, `verify` accepts it and this fails.
+    #[test]
+    fn a_name_is_moved_to_each_side_of_the_string_tables_end() {
+        let body = crate::image_body(SOURCE).expect("the source lowers to an image");
+        let mut reached = [false; 3];
+        let mut alone = None;
+        for seed in 0..4_000u64 {
+            let data = input(&body, &crate::ir::choices(seed, 24));
+            let mut program = from_bytes(&data).expect("the body reads").program;
+            let len = program.strings.len();
+            let ids: Vec<usize> = name_ids(&mut program).iter().map(|id| id.index()).collect();
+            for (at, want) in [len - 1, len, len + 1].into_iter().enumerate() {
+                reached[at] |= ids.contains(&want);
+            }
+            if !ids.iter().any(|&id| id >= len) {
+                continue;
+            }
+            assert!(
+                cove_ir::verify(&program).is_err(),
+                "seed {seed}: a name past the table verified"
+            );
+            let (_, finding) = crate::ir::ir_mutate_classified(&data);
+            assert_eq!(finding, None, "seed {seed}");
+            if alone.is_none() && ids.contains(&len) {
+                for id in name_ids(&mut program) {
+                    if id.index() >= len {
+                        *id = StrId(0);
+                    }
+                }
+                if cove_ir::verify(&program).is_ok() {
+                    alone = Some(seed);
+                }
+            }
+            if reached == [true; 3] && alone.is_some() {
+                return;
+            }
+        }
+        panic!("not reached: each side of the end {reached:?}, a name at the end alone {alone:?}");
     }
 }

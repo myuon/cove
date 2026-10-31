@@ -277,7 +277,9 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
         },
     }
     let (pairs, first) = differential::compare_all(&observed);
-    let mismatch = mismatch.or(first);
+    let mismatch = names_past_the_table(&subject.program)
+        .or(mismatch)
+        .or(first);
     IrReport {
         verified,
         runs: Report {
@@ -288,6 +290,32 @@ pub(crate) fn run_here(subject: Subject) -> IrReport {
             native: summary,
         },
     }
+}
+
+/// A name the program holds outside its code that is no row of its string
+/// table, in a program `cove_ir::verify` accepted.
+///
+/// A rendering reads a layout's or a resource's name as the address of the
+/// literal it names (`dyn.type-name`, `dyn.field-name`), and that read
+/// indexes the literal table unchecked, on `verify`'s word that every such id
+/// is in range. A run reaches the read only for the one layout it renders,
+/// which almost no program does, so a comparison of runs would not see a
+/// verifier that broke its word; this holds the accepted program to it
+/// directly. Mutant `013-verify-string-id-off-by-one` is the defect it
+/// catches (docs/FUZZ_EVALUATION.md, section 12).
+fn names_past_the_table(program: &Program) -> Option<String> {
+    let len = program.strings.len();
+    program
+        .names
+        .iter()
+        .flat_map(|names| names.name.iter().chain(&names.parts))
+        .chain(program.resource_names.iter().map(|named| &named.text))
+        .find(|id| id.index() >= len)
+        .map(|id| {
+            format!(
+                "`cove_ir::verify` accepted a name that is string {id}, and the program has {len} strings"
+            )
+        })
 }
 
 /// One run of `prepared` in `mode`, entered by `subject`'s entry and arguments.

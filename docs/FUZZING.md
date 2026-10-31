@@ -270,7 +270,19 @@ undefined behaviour.
 - `ir_mutate` reads an image body from the front of the input and applies the
   edits in the bytes after it (`crates/cove-fuzz/src/mutate.rs`): an operand,
   a layout, an id or a jump target changed. Its seeds are every program in
-  the repository, so what it edits is what the lowering writes.
+  the repository, so what it edits is what the lowering writes. One edit
+  moves a string id a *name* holds — a layout's, a field's or case's, a
+  resource's, all held outside any instruction — to the string table's last
+  row, its length or one past it (`Edit::name`; bytes 252–255 of the edit
+  choice, which `% 12` mapped a second time, so every other byte still makes
+  the edit it made). The lowering never writes such an id; the verifier must
+  refuse it. A run reads a name only for the layout it renders, so a broken
+  refusal would not show as two modes disagreeing: a program that verifies is
+  also held to every name being a row of its table
+  (`ir::names_past_the_table`) — the
+  [artificial defect](#what-it-detects-artificial-defects) 013 is what this
+  catches, and `fuzz/seeds/ir_mutate/string-id-at-the-tables-length` is an
+  edit whose only fault is that.
 - `image` decodes a body, verifies it, and runs what verifies the way `ir`
   does.
 
