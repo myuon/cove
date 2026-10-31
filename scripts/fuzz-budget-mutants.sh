@@ -47,6 +47,8 @@ out="$(cd "$out" && pwd)"
 m="$root/scripts/fuzz-mutant.sh"
 wt="$root/fuzz/measure/mutants/budget"
 now() { perl -MTime::HiRes=time -e 'printf "%.2f\n", time'; }
+# Arithmetic on fractions, without `bc` (not on every runner).
+calc() { perl -e "printf '%.2f', $1" | sed 's/\.00$//'; }
 targets=""
 for p in $plans; do
   targets="$targets $(awk '$1 ~ /^[0-9]+$/ {print $2}' "$root/fuzz/plans/$p.plan")"
@@ -120,7 +122,7 @@ for mutant in "${mutants[@]}"; do
       fi
     done
   ) > "$mo/build.log" 2>&1 || status=$?
-  echo "build: $(echo "$(now) - $t0" | bc)s, status $status" > "$mo/build.txt"
+  echo "build: $(calc "$(now) - $t0")s, status $status" > "$mo/build.txt"
   if [ "$status" != 0 ]; then
     for p in $plans; do for s in $seeds; do
       printf '%s\t%s\t%s\tbuild failed\t\t\t%s\n' "$mutant" "$p" "$s" "$(tail -1 "$mo/build.log")" >> "$out/results.tsv"

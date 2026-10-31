@@ -77,6 +77,8 @@ out="$(cd "$out" && pwd)"
 slots="$(awk '$1 ~ /^[0-9]+$/ {print $1, $2, $3, $4}' "$plan")"
 targets="$(echo "$slots" | awk '{print $2}' | sort -u | tr '\n' ' ')"
 now() { perl -MTime::HiRes=time -e 'printf "%.2f\n", time'; }
+# Arithmetic on fractions, without `bc` (not on every runner).
+calc() { perl -e "printf '%.2f', $1" | sed 's/\.00$//'; }
 
 triple="$(rustc +nightly -vV | sed -n 's/^host: //p')"
 bin_of() { echo "$root/fuzz/target/san-$2/$triple/release/$1"; }
@@ -99,7 +101,7 @@ bin_of() { echo "$root/fuzz/target/san-$2/$triple/release/$1"; }
 if [ "$build" = 1 ]; then
   t0=$(now)
   (cd "$root" && cargo build --profile checked -p cove-fuzz --features template --quiet)
-  echo "cove-fuzz (checked, stable): $(echo "$(now) - $t0" | bc)s" >> "$out/build.txt"
+  echo "cove-fuzz (checked, stable): $(calc "$(now) - $t0")s" >> "$out/build.txt"
   for san in $(echo "$slots" | awk '{print $4}' | sort -u); do
     want="$(echo "$slots" | awk -v s="$san" '$4 == s {print $2}' | sort -u | tr '\n' ' ')"
     t0=$(now)
@@ -108,7 +110,7 @@ if [ "$build" = 1 ]; then
     for t in $want; do
       (cd "$root/fuzz" && cargo +nightly fuzz build -s "$san" --target-dir "target/san-$san" "$t")
     done
-    echo "fuzz targets, sanitizer $san ($want): $(echo "$(now) - $t0" | bc)s" >> "$out/build.txt"
+    echo "fuzz targets, sanitizer $san ($want): $(calc "$(now) - $t0")s" >> "$out/build.txt"
   done
 fi
 for line in $(echo "$slots" | awk '{print $2 ":" $4}' | sort -u); do
@@ -142,7 +144,7 @@ done
 t_corpus=$(now)
 
 # --- explore ----------------------------------------------------------------
-deadline=$(echo "$t_start + $wall - $reserve" | bc)
+deadline=$(calc "$t_start + $wall - $reserve")
 echo "explore from $t_corpus to $deadline" >> "$out/meta.txt"
 
 # One slot: libFuzzer in a process group of its own, killed at `$4` if it is
@@ -158,7 +160,7 @@ slot() {
     image | ir_mutate) max_len=262144 ;;
   esac
   local begin; begin=$(now)
-  local secs; secs=$(echo "$until - $begin" | bc | cut -d. -f1)
+  local secs; secs=$(calc "int($until - $begin)")
   [ "${secs:-0}" -ge 1 ] || secs=1
   local flags=(
     -fork=1 -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1
@@ -181,7 +183,7 @@ slot() {
     if [ -z "$replayed" ] && grep -q 'starting to fuzz in\|INITED' "$dir/fuzz.log" 2> /dev/null; then
       replayed=$(now)
     fi
-    if [ "$(echo "$(now) >= $until" | bc)" = 1 ]; then
+    if [ "$(calc "$(now) >= $until")" = 1 ]; then
       killed=1
       kill -INT -- "-$pid" 2> /dev/null || true
       sleep 1
@@ -212,7 +214,7 @@ worker() {
   left=$(echo "$lines" | awk '{s += $3} END {print s}')
   while read -r _ t weight san; do
     k=$((k + 1))
-    until=$(echo "$(now) + ($deadline - $(now)) * $weight / $left" | bc -l)
+    until=$(calc "$(now) + ($deadline - $(now)) * $weight / $left")
     slot "$w" "$k" "$t" "$until" "$san"
     left=$((left - weight))
   done <<< "$lines"
