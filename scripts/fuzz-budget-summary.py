@@ -119,7 +119,31 @@ def read_result(path):
     return out
 
 
+def verdict(path):
+    """A mutant trial's verdict from a run's summary.json, on one line:
+    `detected SECONDS SIGNATURE` for a finding the mutant's build fails on
+    and the clean build does not; `only-unrelated` if every finding fails on
+    the clean build too; `run-failed`; or `not-detected`."""
+    s = json.load(open(path))
+    mine = [g for g in s["groups"] if g["kind"] in ("crash", "leak", "other")
+            and g.get("clean_fails_too") is False and "not reproduced" not in g["signature"]]
+    other = [g for g in s["groups"] if g.get("clean_fails_too")]
+    unconfirmed = [g for g in s["groups"] if g not in mine and g not in other]
+    if s["failures"]:
+        print("run-failed", "-", "%d slots failed to run" % len(s["failures"]))
+    elif mine:
+        g = min(mine, key=lambda g: g["first_after"])
+        print("detected", g["first_after"], g["signature"][:120].replace(" ", "_"))
+    elif other:
+        print("only-unrelated", "-", other[0]["signature"][:120].replace(" ", "_"))
+    else:
+        print("not-detected", "-", ("unconfirmed:" + unconfirmed[0]["signature"][:100].replace(" ", "_")) if unconfirmed else "-")
+    return 0
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--verdict":
+        return verdict(sys.argv[2])
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--cove-fuzz", required=True)
