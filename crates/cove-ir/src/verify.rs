@@ -3864,6 +3864,68 @@ mod tests {
         );
     }
 
+    /// A string id names a row of a table of `n` strings exactly when it is
+    /// below `n`: `n - 1` is the last row, `n` and `n + 1` are past the end.
+    /// Held at each place a program holds one outside an instruction — a
+    /// layout's rendered name, a field's or a case's, a resource's — and at
+    /// `scope.enter`'s, whose `n` the instruction check refuses as well.
+    ///
+    /// The lowering never writes an id at the boundary, so no program from
+    /// source reaches this; an image edited by `ir_mutate` does. Mutant
+    /// `013-verify-string-id-off-by-one` (docs/FUZZ_EVALUATION.md, section
+    /// 12) admits `n` and this case is what fails.
+    #[test]
+    fn a_string_id_is_in_range_only_below_the_tables_length() {
+        use crate::program::{LayoutNames, ResourceName, StrId};
+        const N: u32 = 3;
+        let with = |name: u32, part: u32, resource: u32, scope: u32| {
+            let mut held = program(vec![function(
+                vec![Repr::Scope, Repr::Int],
+                INT,
+                vec![
+                    Inst::ScopeEnter {
+                        dst: 0,
+                        name: StrId(scope),
+                    },
+                    Inst::Int { dst: 1, value: 0 },
+                    Inst::Return { src: 1 },
+                ],
+            )]);
+            held.strings = (0..N).map(|n| Arc::from(format!("s{n}"))).collect();
+            held.names = vec![LayoutNames {
+                name: Some(StrId(name)),
+                parts: vec![StrId(part)],
+            }];
+            held.resource_names = vec![ResourceName {
+                module: Arc::from("m"),
+                resource: Arc::from("R"),
+                text: StrId(resource),
+            }];
+            held
+        };
+        let last = N - 1;
+        assert_eq!(
+            faults(&with(last, last, last, last)),
+            Vec::<String>::new(),
+            "the last row is a row"
+        );
+        for id in [N, N + 1] {
+            let past = format!("is {}, but the program has {N} strings", StrId(id));
+            for (held, what) in [
+                (with(id, last, last, last), "a layout's name"),
+                (with(last, id, last, last), "a layout part's name"),
+                (with(last, last, id, last), "a resource's name"),
+                (with(last, last, last, id), "a scope's name"),
+            ] {
+                assert_eq!(
+                    faults(&held),
+                    vec![format!("{what} {past}")],
+                    "{what} at {id}"
+                );
+            }
+        }
+    }
+
     /// Issue #683: a parameter whose layout id is past the layout table was a
     /// panic in `Function::param_words`, not a fault.
     #[test]
