@@ -856,7 +856,10 @@ pub fn each(target: &str, paths: &[PathBuf]) -> Result<Vec<Each>, String> {
         let finding = if counted {
             let replay = crate::stats::replay(target, std::slice::from_ref(&file))?;
             for (flag, path) in [
-                ("full_success_with_native", ["comparisons", "full_success_with_native"]),
+                (
+                    "full_success_with_native",
+                    ["comparisons", "full_success_with_native"],
+                ),
                 ("gc_while_compiled", ["programs", "gc_while_compiled"]),
                 ("native_ran", ["programs", "native_ran"]),
             ] {
@@ -877,8 +880,9 @@ pub fn each(target: &str, paths: &[PathBuf]) -> Result<Vec<Each>, String> {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let target = target.to_string();
-        let measured =
-            std::panic::catch_unwind(move || on_stack(move || subject(&target, &bytes).map(measure)));
+        let measured = std::panic::catch_unwind(move || {
+            on_stack(move || subject(&target, &bytes).map(measure))
+        });
         std::panic::set_hook(hook);
         if let Ok(Some(Some(m))) = measured {
             for (set, tag) in [
