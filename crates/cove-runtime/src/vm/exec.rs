@@ -2006,6 +2006,9 @@ impl<'a> Machine<'a> {
         code: &cove_ir::bytecode::Encoded,
         budget: &Meter,
     ) -> Result<Vec<u64>, RuntimeError> {
+        // The entry, whose span a run that answered holding a cell is refused
+        // at: its frame is the first, and is gone by the time it has answered.
+        let entry = self.frames.first().map(|frame| frame.function);
         std::thread::scope(|threads| {
             let mut running = self.no_handles();
             let mut answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
@@ -2031,6 +2034,22 @@ impl<'a> Machine<'a> {
             // attached at every `.at()` site instead would be the same work
             // repeated at every one of them for no error that reaches two.
             let answer = answer.map_err(|error| self.attach_call_chain(error));
+            // A body that answers with a cell still locked is refused, not
+            // answered (issue 728). The lowering never writes one — a `lock`'s
+            // release follows its call on the one path out — but `verify` does
+            // not follow a lock to its unlock, so a program it accepts can
+            // `return` between the two, and ADR 0120 promises such a run an
+            // `Err` rather than the assertion below.
+            let answer = match answer {
+                Ok(_) if !self.held.is_empty() => {
+                    let error = held_at_answer();
+                    Err(match entry {
+                        Some(entry) => error.at(self.program.function(entry).span),
+                        None => error,
+                    })
+                }
+                answer => answer,
+            };
             debug_assert!(
                 answer.is_err() || !self.anything_running(),
                 "a body that answered left every scope it opened, so nothing is still running"
@@ -5888,6 +5907,14 @@ pub(crate) fn not_a_cell() -> RuntimeError {
 /// An `unlock` of a cell this task is not inside, or not innermost inside.
 pub(crate) fn not_held() -> RuntimeError {
     RuntimeError::new("this `Shared` is given back by a task that is not inside it")
+        .with_rule("A `lock` region is left by the task that entered it, innermost first.")
+}
+
+/// A run that answered while a cell it locked was still held: a `return`
+/// between a `lock` and its end, which no lowering emits and `verify` does not
+/// follow (issue 728). [`not_held`]'s rule, from the other side.
+pub(crate) fn held_at_answer() -> RuntimeError {
+    RuntimeError::new("this run answered while it still held a `Shared` it locked")
         .with_rule("A `lock` region is left by the task that entered it, innermost first.")
 }
 
@@ -11439,6 +11466,42 @@ pub(crate) mod tests {
         assert!(machine.held.is_empty());
         let addr = machine.mem.slot(machine.frames[0].base, 1);
         assert_eq!(cell::holder(&machine.mem, addr), 0);
+    }
+
+    /// An entry that returns between a `lock` and its end (issue 728) is
+    /// refused at its span rather than answered, and the cell is given back.
+    /// It used to reach the exit's debug assertion that a body which answered
+    /// left every cell it took.
+    #[test]
+    fn a_run_that_answers_holding_a_cell_is_refused_and_gives_it_back() {
+        let mut build = Build::default();
+        let int = build.word("Int", Repr::Int);
+        let held = build.layout("Shared", Shape::Shared { value: int });
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Ref],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::SharedLock { cell: 1 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        assert!(cove_ir::verify(&program).is_ok(), "verify accepts it");
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(main, &[], &budget()).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this run answered while it still held a `Shared` it locked"
+        );
+        assert_eq!(error.span, Some(program.function(main).span));
+        assert!(machine.held.is_empty(), "the cell was given back");
     }
 
     // `an_intrinsic_that_cannot_raise_must_not_answer_an_error` stood here, over
