@@ -1768,13 +1768,24 @@ fn fused_push(
     // answered yes — and the count.
     frame[at] = len;
     frame[base_at + count.a() as usize] = count.payload();
-    let into = if byte {
-        1 + len as usize / 8
-    } else {
-        1 + len as usize * width
-    };
     let room = len < u64::from(header_len(store_header));
-    if let Some(into) = run.get(into..into + width).filter(|_| room) {
+    // Where the unit goes, asked only when the store has room for it. `len` is
+    // the owner's length word, which a decoded image can set to anything
+    // (issue 739), so the word index is checked arithmetic: one that does not
+    // fit is no fast path, and the rows below refuse it in their own words.
+    let into = room
+        .then(|| {
+            let unit = usize::try_from(len).ok()?;
+            let into = match byte {
+                true => unit / 8,
+                false => unit.checked_mul(width)?,
+            }
+            .checked_add(1)?;
+            Some(into..into.checked_add(width)?)
+        })
+        .flatten()
+        .and_then(|words| run.get(words));
+    if let Some(into) = into {
         frame[base_at + read.a() as usize] = store;
         if byte {
             // `GROWABLE_PUSH_BYTE`'s blend of one byte into its word.
@@ -9743,6 +9754,41 @@ mod tests {
                 assert_eq!(report.fusions[PUSH_WORDS], 1, "{what}");
                 assert_eq!(report.encoded_dispatches, 2, "{what}");
                 assert_eq!(fast, u64::from(capacity > 1), "{what}");
+            }
+        }
+
+        /// **A length word no store could hold** (issue 739): a decoded image
+        /// can write anything into a vector's length, and the fast path formed
+        /// the unit's word index from it unchecked, so `1 + len * width` and
+        /// the end past it overflowed — a panic under debug assertions where
+        /// ADR 0120 promises a refusal. Such a window is no fast path, and its
+        /// rows refuse it in their own words.
+        #[test]
+        fn a_fused_push_onto_a_length_past_any_store_is_refused_as_the_rows_do() {
+            let f = framed();
+            for (entry, vector, store, args, len) in [
+                (f.push_int, f.int_vector, f.int_store, vec![42], u64::MAX),
+                (
+                    f.push_pair,
+                    f.pair_vector,
+                    f.pair_store,
+                    vec![7, 8],
+                    1 << 63,
+                ),
+            ] {
+                let what = format!("a push at length {len}");
+                let prepare = |machine: &mut Machine<'_>| {
+                    let owner = vector_of(machine, vector, store, len, 4, false);
+                    let mut words = vec![owner];
+                    words.extend(&args);
+                    words
+                };
+                let inspect = |_: &Machine<'_>, _: &[u64]| ();
+                let (fused, report, fast) =
+                    fuses_as_unfused(&what, &f.program, entry, 1 << 16, None, &prepare, &inspect);
+                assert!(fused.said.starts_with("Err("), "{what}: {}", fused.said);
+                assert_eq!(fast, 0, "{what}");
+                assert_eq!(report.windows.fast[PUSH_WORDS], 0, "{what}");
             }
         }
 
