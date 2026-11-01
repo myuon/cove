@@ -356,42 +356,58 @@ fn an_erased_value_renders_as_what_is_in_the_box() {
     );
 }
 
-/// Where the two backends stop at the same place and do not say the same
-/// words, which is written down rather than claimed away.
+/// An erased value opened at a type it does not hold stops both backends at
+/// the same place in the same words (issue 726).
 ///
-/// The box holds a `String` and the program does arithmetic on it. Both
-/// backends fail, at the same expression, and neither produces a value — but
-/// the oracle fails *at the operator*, where it can name both operand types
-/// and the operator, and the machine fails one instruction earlier at the
-/// `Unbox`, which knows the layout it found and not what asked for it.
-///
-/// `cove_ir::Inst::Trap` carries a static message and `Inst::Unbox` raises
-/// its own, so closing this means an instruction that can build a message out
-/// of two layout names and an operator — which is a change to the instruction
-/// set, not to this file. Until then this is the divergence, pinned so that
-/// it is a decision rather than a surprise.
+/// The box holds a `String` or an `Int` and an operator opens it at another
+/// type: beside an `Int`, under `!`, and as an operand of `&&`. The machine
+/// fails at its `Unbox`, which knows the layout it found and not which
+/// operator asked, so it cannot name the operator; the oracle used to fail at
+/// the operator and name both operand types, and the differential comparison
+/// reported the two as different answers. The oracle now opens an `Any` where
+/// the lowering does and says the machine's sentence. Before, this test
+/// pinned the divergence.
 #[test]
-fn the_two_backends_word_a_failed_unboxing_differently() {
-    let source = "use oracle.text\n\
-                  export fn main() -> Result<Int, Error> {\n  \
-                    Ok(text() + 1)\n\
-                  }";
-    let oracle = {
-        let source = source.to_string();
-        on_a_deep_stack(move || on_the_oracle(&source))
-    };
-    let machine = {
-        let source = source.to_string();
-        on_a_deep_stack(move || on_the_machine(&source))
-    };
-    assert_eq!(
-        oracle,
-        Answer::Failed("`+` is not defined for `String` and `Int`".to_string())
-    );
-    assert_eq!(
-        machine,
-        Answer::Failed("this value is not of the type it is being read as".to_string())
-    );
+fn the_two_backends_word_a_failed_unboxing_alike() {
+    for (what, source) in [
+        (
+            "an `Any` beside an `Int`",
+            "use oracle.text\n\
+             export fn main() -> Result<Int, Error> {\n  \
+               Ok(text() + 1)\n\
+             }",
+        ),
+        (
+            "`!` of an `Any`",
+            "use oracle.number\n\
+             export fn main() -> Result<Bool, Error> {\n  \
+               Ok(!number(3))\n\
+             }",
+        ),
+        (
+            "an `Any` operand of `&&`",
+            "use oracle.number\n\
+             export fn main() -> Result<Bool, Error> {\n  \
+               let yes = 1 == 1\n  \
+               Ok(yes && number(3))\n\
+             }",
+        ),
+    ] {
+        let oracle = {
+            let source = source.to_string();
+            on_a_deep_stack(move || on_the_oracle(&source))
+        };
+        let machine = {
+            let source = source.to_string();
+            on_a_deep_stack(move || on_the_machine(&source))
+        };
+        assert_eq!(
+            machine,
+            Answer::Failed("this value is not of the type it is being read as".to_string()),
+            "{what}"
+        );
+        assert_eq!(oracle, machine, "{what}");
+    }
 }
 
 /// The shape `examples/covecheck`'s `main.cove` is written in: a binding

@@ -2098,21 +2098,45 @@ impl<'a> Interpreter<'a> {
             } => self.eval_call(env, callee, args, trailing.as_deref(), span),
             ExprKind::Unary { op, operand } => {
                 let value = self.eval(env, operand)?;
+                // `!` of an `Any` is opened at `Bool`, the answer's type, as
+                // the lowering opens it (issue 726).
+                if *op == UnaryOp::Not
+                    && self.is_erased(operand)
+                    && !matches!(value.erased(), Value(Repr::Bool(_)))
+                {
+                    return Err(not_the_type_read_as().at(span).into());
+                }
                 Ok(unary(*op, value, span)?)
             }
             ExprKind::Binary { op, lhs, rhs } => match op {
                 // `&&` and `||` short-circuit; everything else is left to right.
                 BinaryOp::And | BinaryOp::Or => {
-                    let left = expect_bool(self.eval(env, lhs)?, *op, span)?;
+                    let left = self.eval(env, lhs)?;
+                    let left = expect_bool(self.opened_as_bool(lhs, left)?, *op, span)?;
                     if (*op == BinaryOp::And && !left) || (*op == BinaryOp::Or && left) {
                         return Ok(Value(Repr::Bool(left)));
                     }
-                    let right = expect_bool(self.eval(env, rhs)?, *op, span)?;
+                    let right = self.eval(env, rhs)?;
+                    let right = expect_bool(self.opened_as_bool(rhs, right)?, *op, span)?;
                     Ok(Value(Repr::Bool(right)))
                 }
                 _ => {
                     let left = self.eval(env, lhs)?;
                     let right = self.eval(env, rhs)?;
+                    // An `Any` beside a typed operand is opened at that
+                    // operand's type, after both are evaluated, as
+                    // `Body::opened` opens it; `is` opens neither.
+                    let erased = (self.is_erased(lhs), self.is_erased(rhs));
+                    if *op != BinaryOp::Is && erased.0 != erased.1 {
+                        let (opened, beside) = if erased.0 {
+                            (&left, &right)
+                        } else {
+                            (&right, &left)
+                        };
+                        if !opened.erased().same_type_as(beside.erased()) {
+                            return Err(not_the_type_read_as().at(span).into());
+                        }
+                    }
                     Ok(binary(*op, left, right, span)?)
                 }
             },
@@ -3442,6 +3466,26 @@ impl<'a> Interpreter<'a> {
             vec![Value(Repr::Str(said.into()))],
             span,
         )?)
+    }
+
+    /// Whether `expr`'s checked type is `Any`: a value no schema described,
+    /// which the lowering holds in a box and opens with `Inst::Unbox` where
+    /// something beside it says what it holds.
+    fn is_erased(&self, expr: &Expr) -> bool {
+        matches!(
+            self.program.facts.ty(expr.span.file, expr.id),
+            Some(cove_sema::typeck::Ty::Any)
+        )
+    }
+
+    /// An operand of `&&` or `||`, opened at `Bool` if it is an `Any`, as the
+    /// lowering opens it into the chain's `Bool` — and refused at the
+    /// operand's own span, where the machine's `Unbox` refuses it.
+    fn opened_as_bool(&self, operand: &Expr, value: Value) -> Result<Value, Control> {
+        if self.is_erased(operand) && !matches!(value.erased(), Value(Repr::Bool(_))) {
+            return Err(not_the_type_read_as().at(operand.span).into());
+        }
+        Ok(value)
     }
 
     /// Appends one hole of a tagged literal whose type as written is `ty`,
@@ -4925,6 +4969,19 @@ pub(crate) fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} by zero"))
         .at(span)
         .with_rule("Division and remainder by zero are broken invariants.")
+}
+
+/// An `Any` opened at a type it does not hold: `!` of one holding an `Int`,
+/// an `&&` operand that is not a `Bool`, or one beside a typed operand of
+/// another type (issue 726).
+///
+/// The linear-memory backend's `Inst::Unbox` refusal, word for word. That
+/// instruction knows the layout it found and not which operator asked, so it
+/// cannot say what [`operator_type_error`] says; this evaluator says what it
+/// says, at the span it says it at, because the differential corpus compares
+/// the two and the lowering is what `cove run` runs.
+fn not_the_type_read_as() -> RuntimeError {
+    RuntimeError::new("this value is not of the type it is being read as")
 }
 
 fn operator_type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> RuntimeError {
