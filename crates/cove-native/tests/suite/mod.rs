@@ -8980,6 +8980,12 @@ fn observe_inline<A: Arm>(
 /// validates the view (`View::held`) before reading the owner's words, which
 /// emitted code does not, so each is one hand-over of the observation as it is
 /// and the double writes nothing.
+///
+/// **The kind and the type test follow their views too** (issue 734), so they
+/// are answered inline only of a view `View::held` admits without a table — a
+/// whole heap object at word 0 under its own header layout — and handed over
+/// otherwise: an inline value, which only `Machine::field` can admit, and a
+/// view whose layout is not its owner's header, which the helper refuses.
 pub fn the_type_observations_are_answered_inline_and_the_view_reads_are_not<A: Arm>() {
     use cove_ir::bytecode::Op;
     let mut heap = Heap::new(2);
@@ -9007,6 +9013,20 @@ pub fn the_type_observations_are_answered_inline_and_the_view_reads_are_not<A: A
             Repr::Int,
             Inst::DynKind { dst: 7, view: 3 },
             [0, 0, 0, VECTOR.0 as u64, vector, 0, 0],
+            9,
+        ),
+        (
+            "the kind of a vector layout over a map",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [VECTOR.0 as u64, map, 0, 0, 0, 0, 0],
+            9,
+        ),
+        (
+            "the kind of a vector past word 0",
+            Repr::Int,
+            Inst::DynKind { dst: 7, view: 0 },
+            [VECTOR.0 as u64, vector, 1, 0, 0, 0, 0],
             9,
         ),
         (
@@ -9087,6 +9107,20 @@ pub fn the_type_observations_are_answered_inline_and_the_view_reads_are_not<A: A
             0,
         ),
         (
+            "a vector and a map",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [VECTOR.0 as u64, vector, 0, MAP_INT.0 as u64, map, 0, 0],
+            0,
+        ),
+        (
+            "a vector and a vector layout over a map",
+            Repr::Bool,
+            Inst::DynSameType { dst: 7, a: 0, b: 3 },
+            [VECTOR.0 as u64, vector, 0, VECTOR.0 as u64, map, 0, 0],
+            1,
+        ),
+        (
             "one vector twice",
             Repr::Bool,
             Inst::DynSameObject { dst: 7, a: 0, b: 3 },
@@ -9130,22 +9164,36 @@ pub fn the_type_observations_are_answered_inline_and_the_view_reads_are_not<A: A
             0,
         ),
     ];
+    // A whole heap object at word 0 under its own header layout, which is the
+    // one view emitted code holds without the helper.
+    let whole = |layout: LayoutId, owner: u64, at: u64| {
+        at == 0 && [(VECTOR, vector), (MAP_INT, map), (ARRAY_INT, array)].contains(&(layout, owner))
+    };
     for (what, answer, inst, words, expected) in cases {
-        let handed = matches!(
-            inst,
-            Inst::DynRead { .. } | Inst::DynCase { .. } | Inst::DynCount { .. }
-        );
+        let handed = match inst {
+            Inst::DynRead { .. } | Inst::DynCase { .. } | Inst::DynCount { .. } => true,
+            Inst::DynKind { view, .. } => {
+                let v = view as usize;
+                !whole(LayoutId(words[v] as u32), words[v + 1], words[v + 2])
+            }
+            Inst::DynSameType { a, b, .. } => [a, b].into_iter().any(|v| {
+                let v = v as usize;
+                !whole(LayoutId(words[v] as u32), words[v + 1], words[v + 2])
+            }),
+            _ => false,
+        };
         let seen = observation_of(&inst);
         let op = match inst {
             Inst::DynRead { .. } => Op::DynRead,
             Inst::DynCase { .. } => Op::DynCase,
             Inst::DynCount { .. } => Op::DynCount,
+            Inst::DynSameType { .. } => Op::DynSameType,
             _ => Op::DynKind,
         };
         let (answered, observed) = observe_inline::<A>(answer, inst, words, &heap);
         assert_eq!(answered.outcome, Outcome::Returned, "{what}");
         if handed {
-            // ADR 0120: the helper validates the view before it reads it, so
+            // ADR 0120: the helper validates the view before it follows it, so
             // these are one hand-over each and the double writes nothing. The
             // `expected` column is what the helper answers on the runtime's
             // side, and is checked there.
