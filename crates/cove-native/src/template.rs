@@ -3691,7 +3691,7 @@ impl<'a> Emit<'a> {
     /// view's three words and [`NativeCtx::dyn_layouts`] answer it, and handed
     /// to [`Emit::observe`] otherwise.
     ///
-    /// Seven are answered here, and each is the reflection arm's function read
+    /// Four are answered here, and each is the reflection arm's function read
     /// against the tables the runtime built from that function's own
     /// classification and layouts:
     ///
@@ -3699,20 +3699,18 @@ impl<'a> Emit<'a> {
     /// - **`dyn.same-type`** is the two descriptors' kind and name number
     ///   compared, which is `same_type`'s "the kinds agree, and for a nominal
     ///   kind so do the declared names";
-    /// - **`dyn.read`** is a payload word — or, for a `String`, the owner the
-    ///   view already names — once the kind is the one the destination's `Repr`
-    ///   reads;
-    /// - **`dyn.case`** is the payload word of an enum;
-    /// - **`dyn.count`** is a struct's or a range's field count from the table,
-    ///   an array's or a set's header length, twice a map's, or a vector's length
-    ///   word, and nought for every kind with no children;
     /// - **`dyn.same-object`** is `same_object`'s whole test: one owner, both
     ///   views at word 0 with the owner's own header layout, and that layout a
     ///   `Vector`;
     /// - **`dyn.identity-set`** is two noughts, a null table and `false`: it
-    ///   allocates nothing, so there is nothing to ask;
-    /// - **`dyn.child`** of an inline child is its entry in
-    ///   [`NativeCtx::dyn_children`], written as a view: see [`Emit::child`].
+    ///   allocates nothing, so there is nothing to ask.
+    ///
+    /// `dyn.kind` and `dyn.same-type` follow their views, so each view is first
+    /// held to what [ADR 0120]'s `View::held` admits — and admitted here only
+    /// in the one case that needs no table: a heap value, the whole object, at
+    /// word 0 with its owner's own header layout ([`Emit::held_whole`]).
+    /// `dyn.same-object` compares words and follows neither view, as the arm's
+    /// does.
     ///
     /// **Everything else is the helper, whole**, and so is every case above the
     /// table does not settle: a layout past the table or marked
@@ -3725,6 +3723,7 @@ impl<'a> Emit<'a> {
     /// error. No fast path writes anything before it has decided it answers.
     ///
     /// [ADR 0068]: ../../../../docs/adr/0068-a-dynamic-value-is-inspected-in-cove-not-walked-in-rust.md
+    /// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
     fn observation(&mut self, inst: Inst, seen: Observation) {
         use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
         use cove_ir::DynamicKind;
@@ -3754,15 +3753,18 @@ impl<'a> Emit<'a> {
                 self.and_imm32(RAX, DYN_KIND_MASK as i32);
                 self.cmp_imm32(RAX, DYN_ASK as i32);
                 self.jcc(CC_E, Target::Label(cold));
+                self.held_whole(view, RAX, cold);
                 self.store_slot(dst, RAX);
             }
             Inst::DynSameType { dst, a, b } => {
                 self.load_slot(RAX, a + VIEW_LAYOUT);
                 self.descriptor(RAX, cold);
                 self.refuse_ask(RAX, cold);
+                self.held_whole(a, RAX, cold);
                 self.load_slot(RCX, b + VIEW_LAYOUT);
                 self.descriptor(RCX, cold);
                 self.refuse_ask(RCX, cold);
+                self.held_whole(b, RCX, cold);
                 // `DYN_TYPE_MASK` is the low half, and a 32-bit move is that mask.
                 debug_assert_eq!(DYN_TYPE_MASK, u64::from(u32::MAX));
                 self.mov_rr32(RAX, RAX);
@@ -3872,6 +3874,53 @@ impl<'a> Emit<'a> {
         self.shl_imm8(reg, 3);
         self.add_rr(reg, HEAP_TABLE);
         self.load(reg, reg, 0);
+    }
+
+    /// Takes `cold` unless the view at `view` is one `View::held` admits
+    /// without a table: a non-null owner, offset nought, the owner's own header
+    /// layout, and a kind whose layouts are all one address — a string, a
+    /// collection, a closure or a cell — so that the owner's whole object is
+    /// the value ([ADR 0120]'s "a heap value is its owner's whole object, with
+    /// the owner's own header and offset nought").
+    ///
+    /// Every other view — an inline field, part or element, which only
+    /// `Machine::field` can admit, and one that is not held at all — is the
+    /// helper's, which holds it and refuses it in the runtime's words at this
+    /// instruction. `descriptor` is the view's [`NativeCtx::dyn_layouts`] entry
+    /// and is left as it was; `RDX` and the heap scratch are clobbered.
+    ///
+    /// [ADR 0120]: ../../../../docs/adr/0120-the-vm-runs-only-what-verifies.md
+    fn held_whole(&mut self, view: Slot, descriptor: u8, cold: usize) {
+        use cove_ir::dynamic::{VIEW_AT, VIEW_LAYOUT, VIEW_OWNER};
+        use cove_ir::DynamicKind;
+        let whole = self.label();
+        self.mov_rr(RDX, descriptor);
+        self.and_imm32(RDX, DYN_KIND_MASK as i32);
+        for kind in [
+            DynamicKind::String,
+            DynamicKind::Array,
+            DynamicKind::Vector,
+            DynamicKind::Set,
+            DynamicKind::Map,
+            DynamicKind::Function,
+            DynamicKind::Shared,
+        ] {
+            self.cmp_imm32(RDX, kind.code() as i32);
+            self.jcc(CC_E, Target::Label(whole));
+        }
+        self.jmp(Target::Label(cold));
+        self.bind(whole);
+        self.load_slot(RDX, view + VIEW_AT);
+        self.test_rr(RDX, RDX);
+        self.jcc(CC_NE, Target::Label(cold));
+        self.load_slot(RDX, view + VIEW_OWNER);
+        self.test_rr(RDX, RDX);
+        self.jcc(CC_E, Target::Label(cold));
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.load_slot(HEAP_INDEX, view + VIEW_LAYOUT);
+        self.cmp_rr(RDX, HEAP_INDEX);
+        self.jcc(CC_NE, Target::Label(cold));
     }
 
     /// Takes `cold` when the descriptor in `reg` is [`DYN_ASK`]'s, leaving `reg`
