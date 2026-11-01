@@ -780,11 +780,11 @@ impl Body<'_> {
     /// be picking a type for a program that did not.
     ///
     /// The trap is [`Inst::Unbox`]'s. A box holding something else fails the
-    /// run at this instruction, where the oracle fails at the operator with
-    /// `` `%` is not defined for `String` and `Int` ``. Both stop, and the
-    /// two do not say the same words: the machine knows which layout it
-    /// found and not which operator asked, and `Inst::Trap` carries a static
-    /// message. It is written down here rather than left to be discovered.
+    /// run at this instruction, with `this value is not of the type it is
+    /// being read as`: the machine knows which layout it found and not which
+    /// operator asked, so it cannot say `` `%` is not defined for `String`
+    /// and `Int` ``. The oracle opens an `Any` where this does and says the
+    /// same sentence at the same span (issue 726).
     fn opened(&mut self, a: Val, b: Val, span: Span) -> (Val, Val) {
         if a.layout == b.layout {
             return (a, b);
