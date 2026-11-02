@@ -79,11 +79,18 @@ use crate::repr::Repr;
 /// written there and whether it is written.
 pub type Need = BTreeMap<u32, (Repr, bool)>;
 
-/// The most rounds the needs of address parameters are propagated through the
-/// call graph before the pass gives up on bounding them. A lowering's needs
-/// settle in as many rounds as its deepest chain of calls passing an address
-/// down; a part taken in a recursive call grows a need by one offset a round
-/// and never settles.
+/// The most rounds either fixed point runs, whatever the program's size. A
+/// lowering's needs settle in as many rounds as its deepest chain of calls
+/// passing an address down, or of parts and copies in one function.
+///
+/// The bound that decides is the program's own ([`settle`], [`Needs::of`]):
+/// a need flows from a use back along parts, copies and calls, each adding an
+/// offset of nought or more, so a need that reaches a place along a path that
+/// goes round a cycle of offset nought reaches it along the path without the
+/// cycle as well. Without a cycle of positive offset every need is in place
+/// after as many rounds as the flow has places to pass it through, and a need
+/// still growing after that is going round one — a part taken of its own
+/// source, round a loop or a recursive call — and never settles.
 const ROUNDS: usize = 256;
 
 /// The furthest word from its place an address may be used at. Nothing the
@@ -93,15 +100,27 @@ const REACH: u32 = crate::MAX_FRAME_WORDS as u32;
 /// Every fault in how `program` forms and uses addresses.
 pub(super) fn check(program: &Program) -> Vec<Invalid> {
     let mut faults = Vec::new();
-    let Some(exported) = settle(program) else {
-        faults.push(Invalid {
-            function: "<program>".to_string(),
-            pc: None,
-            what: "the uses of an address parameter do not settle: an address is offset further \
-                   on every call, and its reach cannot be bounded"
-                .to_string(),
-        });
-        return faults;
+    let exported = match settle(program) {
+        Ok(exported) => exported,
+        Err(Unsettled::Rounds) => {
+            faults.push(Invalid {
+                function: "<program>".to_string(),
+                pc: None,
+                what: "the uses of an address parameter do not settle: an address is offset \
+                       further on every call, and its reach cannot be bounded"
+                    .to_string(),
+            });
+            return faults;
+        }
+        Err(Unsettled::Faulted(index, local)) => {
+            let function = program.functions[index].qualified();
+            faults.extend(local.into_iter().map(|(pc, what)| Invalid {
+                function: function.clone(),
+                pc,
+                what,
+            }));
+            return faults;
+        }
     };
     for (index, function) in program.functions.iter().enumerate() {
         let mut local = Vec::new();
@@ -239,7 +258,7 @@ pub(super) fn check(program: &Program) -> Vec<Invalid> {
 /// what it can, and the machine never asks.
 pub fn field_needs(program: &Program) -> Vec<Vec<Option<Need>>> {
     let exported =
-        settle(program).unwrap_or_else(|| vec![BTreeMap::new(); program.functions.len()]);
+        settle(program).unwrap_or_else(|_| vec![BTreeMap::new(); program.functions.len()]);
     program
         .functions
         .iter()
@@ -274,7 +293,7 @@ pub fn field_needs(program: &Program) -> Vec<Vec<Option<Need>>> {
 /// Answers for a program [`super::verify`] accepted.
 pub fn dynamic_uses(program: &Program) -> Vec<Vec<bool>> {
     let exported =
-        settle(program).unwrap_or_else(|| vec![BTreeMap::new(); program.functions.len()]);
+        settle(program).unwrap_or_else(|_| vec![BTreeMap::new(); program.functions.len()]);
     program
         .functions
         .iter()
@@ -325,30 +344,59 @@ pub fn loaded_uses(program: &Program, function: &Function) -> Vec<usize> {
         .collect()
 }
 
+/// Why [`settle`] has no answer.
+enum Unsettled {
+    /// The needs did not reach a fixed point within the program's bound.
+    Rounds,
+    /// The function at this index is at fault, with what is recorded against
+    /// it, given the needs known so far. Those only grow as rounds go on, and
+    /// so does every fault they show — two uses of one word as two `Repr`s, a
+    /// use past the widest value location — so the program is refused, and
+    /// going on would only spend more rounds on a need that may never stop.
+    Faulted(usize, Vec<(Option<usize>, String)>),
+}
+
 /// What every function's address parameters are used as, by parameter slot:
-/// the needs propagated through the call graph to a fixed point, or `None`
-/// if they do not reach one within [`ROUNDS`].
-fn settle(program: &Program) -> Option<Vec<BTreeMap<Slot, Need>>> {
+/// the needs propagated through the call graph to a fixed point.
+///
+/// A round passes a need across at least one more call than the last, and a
+/// path that does not go round a cycle of positive offset (see [`ROUNDS`])
+/// enters each address parameter once at most, so the needs settle within
+/// that many rounds and two more — one to pass the last and one to see
+/// nothing change — or never.
+fn settle(program: &Program) -> Result<Vec<BTreeMap<Slot, Need>>, Unsettled> {
     let mut exported: Vec<BTreeMap<Slot, Need>> = vec![BTreeMap::new(); program.functions.len()];
-    for _ in 0..ROUNDS {
+    let params: usize = program
+        .functions
+        .iter()
+        .map(|function| {
+            let words = function.param_words(&program.layouts) as usize;
+            function
+                .reprs
+                .iter()
+                .take(words)
+                .filter(|repr| **repr == Repr::Addr)
+                .count()
+        })
+        .sum();
+    for _ in 0..ROUNDS.min(params + 2) {
         let mut changed = false;
         for index in 0..program.functions.len() {
-            let needs = Needs::of(
-                program,
-                FunctionId(index as u32),
-                &exported,
-                &mut Vec::new(),
-            );
+            let mut faults = Vec::new();
+            let needs = Needs::of(program, FunctionId(index as u32), &exported, &mut faults);
+            if !faults.is_empty() {
+                return Err(Unsettled::Faulted(index, faults));
+            }
             if needs.params != exported[index] {
                 exported[index] = needs.params;
                 changed = true;
             }
         }
         if !changed {
-            return Some(exported);
+            return Ok(exported);
         }
     }
-    None
+    Err(Unsettled::Rounds)
 }
 
 /// Where an address slot's value came from at some instruction.
@@ -412,11 +460,22 @@ impl Needs {
         let mut refused: BTreeSet<(usize, String)> = BTreeSet::new();
         // To a fixed point: a part's need, a copy's and an argument's flow to
         // what reached them, and a need may be learned after it was passed on.
-        // Bounded as `settle` is: a part taken of its own source round a loop
-        // grows a need by its offset every round, and would reach `REACH` only
-        // after as many rounds as the frame has words.
+        // A round passes every need along at least one more part or copy, so
+        // without a cycle of positive offset (see `ROUNDS`) they settle within
+        // as many rounds as there are places to pass them through — every
+        // parameter and every formation — and one more to see nothing change.
+        // A part taken of its own source round a loop grows a need by its
+        // offset every round, and would reach `REACH` only after as many
+        // rounds as the frame has words.
+        let formations: usize = function
+            .code
+            .iter()
+            .enumerate()
+            .map(|(pc, inst)| writes(program, inst, pc).len())
+            .sum();
+        let bound = ROUNDS.min(places.len() + formations + 1);
         for round in 0.. {
-            if round == ROUNDS {
+            if round == bound {
                 refused.insert((
                     0,
                     "the uses of an address do not settle: a place is offset further every time \
