@@ -4952,4 +4952,162 @@ mod tests {
             vec!["stores a unit of a run of `Int` words, and this instruction admits only packed bytes"]
         );
     }
+
+    /// `m.f(p)`: `p` offset by one in place round a loop, stored through as
+    /// an `Int`, and passed to `f` again — issue 748's shape, with the loop,
+    /// the recursion, or both. Each is a cycle of positive offset, so the
+    /// need of `p` never settles.
+    fn offset_round_a_cycle(round_a_loop: bool, recursive: bool) -> Program {
+        let mut code = vec![Inst::AddrOfPart {
+            dst: 0,
+            addr: 0,
+            at: 1,
+        }];
+        if round_a_loop {
+            code.push(Inst::BranchFalse { cond: 2, to: 0 });
+        }
+        code.push(Inst::Store {
+            addr: 0,
+            src: 1,
+            layout: INT,
+        });
+        if recursive {
+            code.push(Inst::Call {
+                dst: 1,
+                callee: FunctionId(0),
+                args: ArgsId(0),
+            });
+        }
+        code.push(Inst::Return { src: 1 });
+        let mut f = function(vec![Repr::Addr, Repr::Int, Repr::Bool], INT, code);
+        f.params = vec![ADDR];
+        let mut held = program(vec![f]);
+        held.args = vec![vec![Arg {
+            slot: 0,
+            layout: ADDR,
+        }]];
+        held
+    }
+
+    /// Issue 748: an address offset round a loop *and* passed to a recursive
+    /// call. The per-function fixed point was cut off at 256 rounds and its
+    /// refusal dropped, so the cross-call one re-ran it for 256 rounds more,
+    /// each over a need grown towards the frame-wide reach: no answer in
+    /// minutes. Both are now bounded by the program's own size and the first
+    /// refusal ends them.
+    #[test]
+    fn an_address_offset_round_a_cycle_is_refused_and_promptly() {
+        let refused = |round_a_loop, recursive| {
+            faults(&offset_round_a_cycle(round_a_loop, recursive))
+                .into_iter()
+                .any(|what| what.contains("do not settle"))
+        };
+        assert!(refused(true, true), "the loop and the recursion");
+        assert!(refused(true, false), "the loop alone");
+        assert!(refused(false, true), "the recursion alone");
+        assert_eq!(
+            faults(&offset_round_a_cycle(false, false)),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The bounds that refuse a cycle are no tighter than the longest chain
+    /// without one: parts written against the order a round visits them in,
+    /// passed down a chain of calls each taking one more part, settle — and
+    /// what they settle to is the sum of every offset, held to the frame that
+    /// formed the place.
+    #[test]
+    fn a_chain_of_parts_and_calls_settles_to_the_sum_of_its_offsets() {
+        // `m.g1(p)` .. `m.g3(p)`: each passes `p + 1` to the next, and the last
+        // stores an `Int` through its own `p + 1`.
+        let link = |next: Option<u32>| {
+            let mut code = vec![Inst::AddrOfPart {
+                dst: 1,
+                addr: 0,
+                at: 1,
+            }];
+            match next {
+                Some(next) => code.push(Inst::Call {
+                    dst: 2,
+                    callee: FunctionId(next),
+                    args: ArgsId(1),
+                }),
+                None => code.push(Inst::Store {
+                    addr: 1,
+                    src: 2,
+                    layout: INT,
+                }),
+            }
+            code.push(Inst::Return { src: 2 });
+            let mut f = function(vec![Repr::Addr, Repr::Addr, Repr::Int], INT, code);
+            f.params = vec![ADDR];
+            f
+        };
+        // `m.main`: the address of slot 0, three parts of it in a chain each
+        // written before the one it is taken of, and a call handing the last
+        // to `g1`. The use is `3 + 3` words from slot 0.
+        let main = |frame: Vec<Repr>| {
+            let place = frame.len() as u32;
+            let mut reprs = frame;
+            reprs.extend([Repr::Addr, Repr::Addr, Repr::Addr, Repr::Addr, Repr::Int]);
+            let code = vec![
+                Inst::AddrOfSlot {
+                    dst: place,
+                    slot: 0,
+                },
+                Inst::Jump { to: 5 },
+                Inst::AddrOfPart {
+                    dst: place + 3,
+                    addr: place + 2,
+                    at: 1,
+                },
+                Inst::Call {
+                    dst: place + 4,
+                    callee: FunctionId(1),
+                    args: ArgsId(0),
+                },
+                Inst::Return { src: place + 4 },
+                Inst::AddrOfPart {
+                    dst: place + 1,
+                    addr: place,
+                    at: 1,
+                },
+                Inst::Jump { to: 7 },
+                Inst::AddrOfPart {
+                    dst: place + 2,
+                    addr: place + 1,
+                    at: 1,
+                },
+                Inst::Jump { to: 2 },
+            ];
+            let mut held = program(vec![
+                function(reprs, INT, code),
+                link(Some(2)),
+                link(Some(3)),
+                link(None),
+            ]);
+            held.args = vec![
+                vec![Arg {
+                    slot: place + 3,
+                    layout: ADDR,
+                }],
+                vec![Arg {
+                    slot: 1,
+                    layout: ADDR,
+                }],
+            ];
+            held
+        };
+        assert_eq!(faults(&main(vec![Repr::Int; 7])), Vec::<String>::new());
+        let mut frame = vec![Repr::Int; 7];
+        frame[6] = Repr::Float;
+        assert_eq!(
+            faults(&main(frame)),
+            vec![
+                "forms the address of slot 0, and word 6 from it is used as int where the frame \
+                 holds float"
+                    .to_string()
+            ]
+        );
+    }
 }
