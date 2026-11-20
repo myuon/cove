@@ -39,9 +39,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The runner image ships a current stable toolchain; asking for the two
-      # components is a no-op when they are already there and a clear failure
-      # when they are not.
+      # `rust-toolchain.toml` pins the toolchain, so the runner image's own
+      # stable is not what runs; rustup installs the pinned one on first use.
+      # Every job below gets the same one that way, which is load-bearing: the
+      # Unicode tests compare against the toolchain's Unicode version. Asking
+      # for the two components is a no-op when they are already there and a
+      # clear failure when they are not.
       - name: Show the toolchain
         run: |
           rustup component add clippy rustfmt
