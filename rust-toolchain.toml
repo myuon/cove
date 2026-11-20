@@ -1,0 +1,18 @@
+# The toolchain is pinned because Cove's Unicode version is checked against it.
+#
+# ADR 0064's Decision 5 has Cove own its Unicode version: the case tables in
+# `crates/cove-sema/std/string.cove` are Unicode 17.0.0, and
+# `crates/cove-sema/tests/unicase.rs` and `crates/cove-runtime/tests/unicode.rs`
+# hold them to the toolchain's own `char` and `str::to_lowercase`. Those tests
+# are the generator's oracle, so they need a toolchain built against the same
+# Unicode. Rust 1.100.0 moved to Unicode 18.0.0 and the runner images moved to
+# it on their own, which turned the gate red with no change in the repository.
+#
+# So the toolchain moves when somebody moves it, here. Moving it past a Unicode
+# revision is moving Cove's Unicode version: regenerate the tables as
+# `unicase.rs` describes and change the version recorded beside them in the
+# same change.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
