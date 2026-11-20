@@ -374,6 +374,49 @@ Nothing collects those, so sweeping by the dead name is worth doing after a
 rename, and it is safe — no current target can reference an artifact named
 after one that is gone.
 
+## Working on this repository
+
+### Decide and act; do not ask about routine steps
+
+The maintainer has authorised acting on your own judgement here: merging a PR
+you opened for agreed work, pushing, opening PRs and issues, commenting on and
+editing issues, and choosing what to work on next. The same holds on the
+sibling repository `myuon/the-cove`, including pushing to its `main`. Ask
+nothing about routine sequencing — the maintainer works asynchronously, so a
+question they must come back to is a session that stalls, and the
+"which next?" questions were always answered with the recommendation.
+
+- Decide, act, and put the reasoning where a reader will find it: the commit
+  message and the PR body, not the chat. Report what was done and what it
+  measured, not what you are about to do.
+- Still raise a **genuine fork** — one whose answers lead somewhere materially
+  different, such as whether to add language surface (see "Syntax must earn its
+  place" in [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md)). Write it on the GitHub
+  issue and keep working on what does not depend on the answer, on the
+  documented default.
+- The exception: an irreversible or outward-facing action that was not part of
+  the agreed work.
+
+### Agents sharing a checkout
+
+Background agents in one checkout break each other's work in ways that pass
+every gate, so:
+
+- **One agent per tree.** Run a second piece of work in parallel only with its
+  own worktree (`isolation: "worktree"`). Two agents in one tree serialise on
+  cargo's lock and contend for the CPU (see "two builds at once" above), and
+  one agent's temporary instrumentation ends up in the other's build. If two
+  already share a tree, take the heavy commands back and leave the agents to
+  analysis only.
+- **Stage explicit paths.** Never `git add -A` or `git commit` without paths
+  while agents are working: both have swept an agent's half-finished edit into
+  an unrelated commit. Check `git status --short` first.
+- **Agents must not run `git stash`, `git checkout`, `git reset` or
+  `git clean`.** Say so in every agent's instructions: one agent's
+  `git stash -u` reverted another's in-progress files.
+- Before trusting a measurement or an agent's report of completion, check
+  `git status --short` and `git diff --stat` for what actually changed.
+
 ## Architecture Decision Records
 
 ADRs live in `docs/adr/`, numbered sequentially.
